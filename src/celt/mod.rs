@@ -18,6 +18,8 @@ use crate::celt::quant_bands::{
     unquant_energy_finalise, unquant_fine_energy,
 };
 use crate::celt::rate::clt_compute_allocation;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use crate::cpu_features::FeatureCache;
 use crate::range_coder::BITRES;
 use crate::range_coder::RangeCoder;
 
@@ -32,14 +34,28 @@ use crate::range_coder::RangeCoder;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline]
 pub(crate) fn have_avx_fma() -> bool {
-    std::arch::is_x86_feature_detected!("avx") && std::arch::is_x86_feature_detected!("fma")
+    static CACHE: FeatureCache = FeatureCache::new();
+    CACHE.get(|| {
+        std::arch::is_x86_feature_detected!("avx") && std::arch::is_x86_feature_detected!("fma")
+    })
 }
 
 /// Companion to [`have_avx_fma`] for kernels declared `avx2,fma`.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline]
 pub(crate) fn have_avx2_fma() -> bool {
-    std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    static CACHE: FeatureCache = FeatureCache::new();
+    CACHE.get(|| {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    })
+}
+
+/// Companion for kernels declared `avx` alone (the MDCT's TDAC fold).
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[inline]
+pub(crate) fn have_avx() -> bool {
+    static CACHE: FeatureCache = FeatureCache::new();
+    CACHE.get(|| std::arch::is_x86_feature_detected!("avx"))
 }
 
 #[cfg(target_arch = "aarch64")]

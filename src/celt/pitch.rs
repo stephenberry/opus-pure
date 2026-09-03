@@ -196,6 +196,11 @@ unsafe fn dual_inner_prod_neon(x: &[f32], y1: &[f32], y2: &[f32], n: usize) -> (
 unsafe fn xcorr_kernel_neon(x: &[f32], y: &[f32], sum: &mut [f32; 4], mut len: usize) {
     use std::arch::aarch64::*;
 
+    if len == 0 {
+        *sum = [0.0; 4];
+        return;
+    }
+
     // The kernel consumes `len` taps from `x` and, for each of them, a
     // four-wide window of `y`, so the last window reaches `y[len + 2]`.
     // Trimming to those lengths is what puts the pointer walk below in bounds.

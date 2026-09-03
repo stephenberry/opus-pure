@@ -1,3 +1,5 @@
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use crate::cpu_features::FeatureCache;
 use crate::silk::define::*;
 use crate::silk::macros::*;
 
@@ -777,17 +779,8 @@ fn warped_corr_update_scalar(corr_qc: &mut [i64], state_qs: &[i32], order: usize
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn warped_corr_avx2_enabled() -> bool {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    static STATE: AtomicU8 = AtomicU8::new(0);
-    match STATE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => {
-            let on = is_x86_feature_detected!("avx2");
-            STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
-            on
-        }
-    }
+    static CACHE: FeatureCache = FeatureCache::new();
+    CACHE.get(|| is_x86_feature_detected!("avx2"))
 }
 
 /// AVX2 twin: 4 taps/iteration, `(state[i] as i64 * state0 as i64) >> 16`

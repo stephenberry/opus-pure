@@ -185,7 +185,7 @@ pub struct OpusEncoder {
     /// `celt_delay` each frame so neither allocation is dropped.
     celt_delay_next: Vec<f32>,
 
-    rc: RangeCoder,
+    rc: RangeCoder<'static>,
 }
 
 /// Input bit depth the analysis noise floors assume (opus_encoder.c float-API

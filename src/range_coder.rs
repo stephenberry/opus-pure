@@ -33,9 +33,11 @@ macro_rules! tell_frac_inline {
 }
 pub(crate) use tell_frac_inline;
 
+use std::borrow::Cow;
+
 #[derive(Clone)]
-pub struct RangeCoder {
-    pub buf: Vec<u8>,
+pub struct RangeCoder<'a> {
+    pub buf: Cow<'a, [u8]>,
     pub storage: u32,
     pub end_offs: u32,
     pub end_window: u32,
@@ -49,11 +51,11 @@ pub struct RangeCoder {
     pub error: i32,
 }
 
-impl RangeCoder {
+impl RangeCoder<'static> {
     pub fn new_encoder(size: u32) -> Self {
         let buf = vec![0u8; size as usize];
         RangeCoder {
-            buf,
+            buf: Cow::Owned(buf),
             storage: size,
             end_offs: 0,
             end_window: 0,
@@ -74,10 +76,11 @@ impl RangeCoder {
         // was. Neither branch has to zero what it exposes: the encoder writes
         // every byte before it reads one, and `storage` below bounds it to the
         // length set here.
-        if self.buf.len() < size as usize {
-            self.buf.resize(size as usize, 0);
+        let buf = self.buf.to_mut();
+        if buf.len() < size as usize {
+            buf.resize(size as usize, 0);
         } else {
-            self.buf.truncate(size as usize);
+            buf.truncate(size as usize);
         }
         self.storage = size;
         self.end_offs = 0;
@@ -91,10 +94,12 @@ impl RangeCoder {
         self.rem = -1;
         self.error = 0;
     }
+}
 
-    pub fn new_decoder(data: &[u8]) -> Self {
+impl<'a> RangeCoder<'a> {
+    pub fn new_decoder(data: &'a [u8]) -> Self {
         let storage = data.len() as u32;
-        let buf = data.to_vec();
+        let buf = Cow::Borrowed(data);
         let mut rc = RangeCoder {
             buf,
             storage,
@@ -235,7 +240,7 @@ impl RangeCoder {
             let write_count = full_bytes.min(available);
             if write_count > 0 {
                 let start = (self.storage - self.end_offs - write_count) as usize;
-                self.buf[start..start + write_count as usize].fill(0);
+                self.buf.to_mut()[start..start + write_count as usize].fill(0);
                 self.end_offs += write_count;
             }
             if write_count < full_bytes {
@@ -298,12 +303,25 @@ impl RangeCoder {
     /// Shrink the range coder buffer, moving end-coded bytes to the new end.
     /// Equivalent to C's `ec_enc_shrink`.
     pub fn shrink(&mut self, new_size: u32) {
-        debug_assert!(self.offs + self.end_offs <= new_size);
+        assert!(
+            self.offs + self.end_offs <= new_size,
+            "RangeCoder::shrink: new_size {} too small for offs {} + end_offs {}",
+            new_size,
+            self.offs,
+            self.end_offs
+        );
+        assert!(
+            new_size <= self.storage,
+            "RangeCoder::shrink: new_size {} exceeds storage {}",
+            new_size,
+            self.storage
+        );
         if self.end_offs > 0 {
             let old_end_start = (self.storage - self.end_offs) as usize;
             let old_end_end = self.storage as usize;
             let new_end_start = (new_size - self.end_offs) as usize;
             self.buf
+                .to_mut()
                 .copy_within(old_end_start..old_end_end, new_end_start);
         }
         self.storage = new_size;
@@ -312,7 +330,7 @@ impl RangeCoder {
     #[inline(always)]
     fn write_byte(&mut self, value: u8) {
         if self.offs + self.end_offs < self.storage {
-            self.buf[self.offs as usize] = value;
+            self.buf.to_mut()[self.offs as usize] = value;
             self.offs += 1;
         } else {
             self.error = 1;
@@ -370,7 +388,7 @@ impl RangeCoder {
                 let carry = c >> EC_SYM_BITS;
                 if self.rem >= 0 {
                     if self.offs + self.end_offs < self.storage {
-                        self.buf[self.offs as usize] = (self.rem + carry) as u8;
+                        self.buf.to_mut()[self.offs as usize] = (self.rem + carry) as u8;
                         self.offs += 1;
                     } else {
                         self.error = 1;
@@ -381,7 +399,7 @@ impl RangeCoder {
                     let ext = self.ext as usize;
                     for _j in 0..ext {
                         if self.offs + self.end_offs < self.storage {
-                            self.buf[self.offs as usize] = sym as u8;
+                            self.buf.to_mut()[self.offs as usize] = sym as u8;
                             self.offs += 1;
                         } else {
                             self.error = 1;
@@ -567,17 +585,23 @@ impl RangeCoder {
         if self.offs + self.end_offs < self.storage {
             self.end_offs += 1;
             let idx = (self.storage - self.end_offs) as usize;
-            self.buf[idx] = value;
+            self.buf.to_mut()[idx] = value;
         } else {
             self.error = 1;
         }
+    }
+
+    #[inline(always)]
+    pub fn buf_mut(&mut self) -> &mut [u8] {
+        self.buf.to_mut()
     }
 
     pub fn patch_initial_bits(&mut self, val: u32, nbits: u32) {
         let shift = EC_SYM_BITS - nbits;
         let mask = ((1u32 << nbits) - 1) << shift;
         if self.offs > 0 {
-            self.buf[0] = ((self.buf[0] as u32 & !mask) | (val << shift)) as u8;
+            let b0 = self.buf[0] as u32;
+            self.buf.to_mut()[0] = ((b0 & !mask) | (val << shift)) as u8;
         } else if self.rem >= 0 {
             self.rem = ((self.rem as u32 & !mask) | (val << shift)) as i32;
         } else if self.rng <= (EC_CODE_TOP >> nbits) {
@@ -619,8 +643,9 @@ impl RangeCoder {
         }
 
         if self.error == 0 {
+            let buf = self.buf.to_mut();
             for i in self.offs..(self.storage - self.end_offs) {
-                self.buf[i as usize] = 0;
+                buf[i as usize] = 0;
             }
 
             if used > 0 {
@@ -634,7 +659,7 @@ impl RangeCoder {
                         self.error = -1;
                     }
                     let idx = (self.storage - self.end_offs - 1) as usize;
-                    self.buf[idx] |= window as u8;
+                    self.buf.to_mut()[idx] |= window as u8;
                 }
             }
         }
@@ -645,7 +670,7 @@ impl RangeCoder {
 mod tests {
     use super::*;
 
-    impl RangeCoder {
+    impl RangeCoder<'_> {
         /// Finalize and copy out the coded bytes. Production code encodes into
         /// a caller-owned buffer and reads `buf`/`storage` directly, so this
         /// convenience copy is test-only.

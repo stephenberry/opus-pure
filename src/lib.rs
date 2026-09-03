@@ -175,6 +175,8 @@ mod soft_clip;
 mod analysis;
 mod analysis_data;
 mod celt;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod cpu_features;
 mod hp_cutoff;
 mod range_coder;
 mod silk;

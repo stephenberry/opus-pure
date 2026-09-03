@@ -13,7 +13,7 @@
 use crate::{Error, Result};
 
 use crate::encoder::MAX_ENCODING_DEPTH;
-use crate::repacketizer::{Repacketizer, take_self_delimited};
+use crate::repacketizer::{Repacketizer, take_self_delimited_into};
 use crate::soft_clip::{float_to_i16, i16_to_float};
 use crate::{Application, Bandwidth, OpusDecoder, OpusEncoder};
 
@@ -432,6 +432,8 @@ pub struct OpusMSDecoder {
     /// Float scratch [`decode_s16`](OpusMSDecoder::decode_s16) decodes into
     /// before converting, kept rather than allocated per call.
     buf_f32: Vec<f32>,
+    /// Scratch buffer for un-delimiting multistream packets.
+    buf_rebuilt: Vec<u8>,
 }
 
 /// Shows the layout, not the decoders' coding state.
@@ -461,6 +463,7 @@ impl OpusMSDecoder {
             decoders,
             buf_stream: Vec::new(),
             buf_f32: Vec::new(),
+            buf_rebuilt: Vec::new(),
         })
     }
 
@@ -526,6 +529,7 @@ impl OpusMSDecoder {
         // Taken out of `self` so a stream's decoder can borrow `self` mutably
         // at the same time; put back before the return.
         let mut buf = std::mem::take(&mut self.buf_stream);
+        let mut rebuilt = std::mem::take(&mut self.buf_rebuilt);
         buf.clear();
         buf.resize(frame_size * 2, 0.0);
         let mut data = packet;
@@ -538,13 +542,12 @@ impl OpusMSDecoder {
                 // The last stream is a normal packet; every earlier one is
                 // self-delimited and must have its length prefix stripped before the
                 // single-stream decoder, which does not understand that framing.
-                let (owned, stream_slice, advance) = if last {
-                    (None, data, data.len())
+                let (stream_slice, advance) = if last {
+                    (data, data.len())
                 } else {
-                    let (rebuilt, off) = take_self_delimited(data, frame_size as i32)?;
-                    (Some(rebuilt), data, off)
+                    let off = take_self_delimited_into(data, &mut rebuilt)?;
+                    (rebuilt.as_slice(), off)
                 };
-                let stream_slice = owned.as_deref().unwrap_or(stream_slice);
                 let n = self.decoders[s].decode_native(
                     stream_slice,
                     frame_size,
@@ -586,6 +589,7 @@ impl OpusMSDecoder {
             Ok(produced)
         })();
         self.buf_stream = buf;
+        self.buf_rebuilt = rebuilt;
         result
     }
 

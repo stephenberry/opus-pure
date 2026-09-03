@@ -6,6 +6,16 @@ use super::header::{OpusHead, OpusTags};
 use super::page::{CAPTURE_PATTERN, HEADER_LEN, MAX_PAGE_PAYLOAD, PageHeader, verify_crc};
 use crate::{Error, Result};
 
+/// Largest packet the reader will reassemble from continued pages, 16 MiB.
+///
+/// A packet's own framing bounds its frames but not its padding, so nothing in
+/// the format stops a chain of continued pages from growing `partial` for as
+/// long as the source keeps delivering. This is far above any packet an
+/// encoder produces (a 120 ms packet at the highest rate is under 8 KiB) and
+/// exists only so a hostile stream cannot make the reader allocate without
+/// limit.
+pub(crate) const MAX_OGG_PACKET_BYTES: usize = 16 * 1024 * 1024;
+
 /// One Opus packet recovered from the container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -112,6 +122,8 @@ pub struct OggOpusReader<R: Read> {
     saw_eos: bool,
     /// The source returned EOF.
     exhausted: bool,
+    /// Reusable payload buffer to avoid 64 KB heap allocation per page read.
+    payload_buf: Vec<u8>,
 }
 
 /// Shows where the reader has got to in the stream.
@@ -144,6 +156,7 @@ impl<R: Read> OggOpusReader<R> {
             partial: Vec::new(),
             saw_eos: false,
             exhausted: false,
+            payload_buf: Vec::new(),
         };
 
         let first = r
@@ -248,14 +261,15 @@ impl<R: Read> OggOpusReader<R> {
             return Err(Error::InvalidStream("page has an empty segment table"));
         }
 
-        let mut segments = vec![0u8; header.segment_count as usize];
-        read_exact(&mut self.source, &mut segments)?;
+        let mut segments_arr = [0u8; 255];
+        let segments = &mut segments_arr[..header.segment_count as usize];
+        read_exact(&mut self.source, segments)?;
         let payload_len: usize = segments.iter().map(|&s| s as usize).sum();
         debug_assert!(payload_len <= MAX_PAGE_PAYLOAD);
-        let mut payload = vec![0u8; payload_len];
-        read_exact(&mut self.source, &mut payload)?;
+        self.payload_buf.resize(payload_len, 0);
+        read_exact(&mut self.source, &mut self.payload_buf)?;
 
-        if !verify_crc(&raw, &segments, &payload, header.crc) {
+        if !verify_crc(&raw, segments, &self.payload_buf, header.crc) {
             return Err(Error::InvalidStream("page CRC mismatch"));
         }
 
@@ -282,9 +296,14 @@ impl<R: Read> OggOpusReader<R> {
 
         let mut off = 0usize;
         for (i, &lace) in segments.iter().enumerate() {
+            let lace_sz = lace as usize;
+            if self.partial.len().saturating_add(lace_sz) > MAX_OGG_PACKET_BYTES {
+                self.partial.clear();
+                return Err(Error::InvalidStream("packet exceeds maximum allowed size"));
+            }
             self.partial
-                .extend_from_slice(&payload[off..off + lace as usize]);
-            off += lace as usize;
+                .extend_from_slice(&self.payload_buf[off..off + lace_sz]);
+            off += lace_sz;
 
             if lace < 255 {
                 // Terminating segment: the packet is complete.

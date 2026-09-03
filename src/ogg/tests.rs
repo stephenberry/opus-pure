@@ -228,6 +228,29 @@ fn a_corrupt_page_is_an_error_not_silent_truncation() {
     );
 }
 
+/// The cap on a reassembled packet is what stops a chain of continued pages
+/// from growing `partial` without limit. It sits far above any real packet, so
+/// exactly the cap still reads back and one byte more is refused.
+#[test]
+fn a_packet_past_the_size_cap_is_refused() {
+    use super::reader::MAX_OGG_PACKET_BYTES;
+    let head = OpusHead::new(1, 48_000).unwrap();
+    for (len, accepted) in [
+        (MAX_OGG_PACKET_BYTES, true),
+        (MAX_OGG_PACKET_BYTES + 1, false),
+    ] {
+        let pkt = pseudo_packet(7, len);
+        let bytes = mux(head.clone(), OpusTags::new(), &[(pkt.clone(), 960)]);
+        let mut r = OggOpusReader::new(std::io::Cursor::new(&bytes)).unwrap();
+        let got = r.read_packet();
+        if accepted {
+            assert_eq!(got.unwrap().unwrap().data, pkt);
+        } else {
+            assert!(matches!(got, Err(Error::InvalidStream(_))), "{got:?}");
+        }
+    }
+}
+
 #[test]
 fn truncated_stream_is_rejected() {
     let head = OpusHead::new(1, 48_000).unwrap();

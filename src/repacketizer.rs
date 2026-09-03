@@ -205,28 +205,28 @@ pub(crate) fn parse_packet(
 }
 
 /// Take one self-delimited packet from the front of `data` and re-emit it as a
-/// normal Opus packet, also returning how many bytes it consumed.
+/// normal Opus packet into `out`, returning how many bytes of `data` it
+/// consumed.
 ///
 /// A multistream packet concatenates its streams in self-delimited form
 /// (RFC 6716 Appendix B): every stream but the last carries an explicit length
 /// for its final frame. [`OpusDecoder`](crate::OpusDecoder) parses only normal
 /// packets, so that prefix has to be removed — handing the self-delimited bytes
 /// straight through makes the decoder read the length as payload.
-pub(crate) fn take_self_delimited(data: &[u8], framesize: i32) -> Result<(Vec<u8>, usize)> {
+///
+/// The frames are copied once, from `data` into `out`, which is cleared first;
+/// the multistream decoder keeps one `out` and reuses it across streams.
+pub(crate) fn take_self_delimited_into(data: &[u8], out: &mut Vec<u8>) -> Result<usize> {
     let (toc, frames, consumed) = parse_packet(data, true)?;
-    let rp = Repacketizer {
+    out.clear();
+    emit_packet(
         toc,
-        framesize,
-        frames: frames
-            .iter()
-            .map(|&(o, l)| data[o..o + l].to_vec())
-            .collect(),
-        spare: Vec::new(),
-    };
-    let n = rp.frames.len();
-    let mut out = Vec::new();
-    rp.out_range_full(0, n, None, false, &mut out)?;
-    Ok((out, consumed))
+        frames.iter().map(|&(o, l)| &data[o..o + l]),
+        None,
+        false,
+        out,
+    )?;
+    Ok(consumed)
 }
 
 /// opus_repacketizer: accumulate frames from one or more same-config packets,
@@ -361,8 +361,6 @@ impl Repacketizer {
         Ok(out)
     }
 
-    /// Appends, so `out` may already hold something; `start` is where this
-    /// packet begins inside it, and every length below is measured from there.
     fn out_range_full(
         &self,
         begin: usize,
@@ -376,77 +374,103 @@ impl Repacketizer {
                 "frame range must satisfy begin < end <= nb_frames",
             ));
         }
-        let count = end - begin;
-        let lens: Vec<usize> = self.frames[begin..end].iter().map(|f| f.len()).collect();
-        let start = out.len();
+        emit_packet(
+            self.toc,
+            self.frames[begin..end].iter().map(Vec::as_slice),
+            pad_to,
+            self_delimited,
+            out,
+        )
+    }
+}
 
-        if count == 1 {
-            out.push(self.toc & 0xfc); // code 0
-        } else if count == 2 && lens[0] == lens[1] {
-            out.push((self.toc & 0xfc) | 0x1); // code 1
-        } else if count == 2 {
-            out.push((self.toc & 0xfc) | 0x2); // code 2
-            encode_size(lens[0] as i32, out);
+/// Emit `frames` under `toc` as one packet, using the shortest code that fits:
+/// 0 for one frame, 1 for two of equal length, 2 for two unequal, 3 for more
+/// or whenever padding is wanted. This is the single place a packet's framing
+/// is written, shared by the repacketizer and the multistream un-delimiter.
+///
+/// Appends, so `out` may already hold something; `start` is where this packet
+/// begins inside it, and every length below is measured from there.
+fn emit_packet<'f>(
+    toc: u8,
+    frames: impl ExactSizeIterator<Item = &'f [u8]> + Clone,
+    pad_to: Option<usize>,
+    self_delimited: bool,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let count = frames.len();
+    if count == 0 {
+        return Err(Error::InvalidArgument("a packet needs at least one frame"));
+    }
+    let lens = || frames.clone().map(<[u8]>::len);
+    let first_len = lens().next().unwrap_or(0);
+    let last_len = lens().last().unwrap_or(0);
+    let vbr = lens().any(|l| l != first_len);
+    let start = out.len();
+
+    if count == 1 {
+        out.push(toc & 0xfc); // code 0
+    } else if count == 2 && !vbr {
+        out.push((toc & 0xfc) | 0x1); // code 1
+    } else if count == 2 {
+        out.push((toc & 0xfc) | 0x2); // code 2
+        encode_size(first_len as i32, out);
+    }
+
+    if count > 2 || pad_to.is_some() {
+        // Code 3 (needed for >2 frames, or to carry padding). Discards
+        // whatever the branch above wrote for *this* packet, not anything
+        // already in the caller's buffer.
+        out.truncate(start);
+        out.push((toc & 0xfc) | 0x3);
+        out.push(if vbr {
+            (count as u8) | 0x80
+        } else {
+            count as u8
+        });
+        // Compute current size to know the padding amount.
+        let mut tot = 2usize;
+        if vbr {
+            for l in lens().take(count - 1) {
+                tot += 1 + usize::from(l >= 252) + l;
+            }
+            tot += last_len;
+        } else {
+            tot += count * first_len;
         }
-
-        let want_pad = pad_to.is_some();
-        if count > 2 || want_pad {
-            // Code 3 (needed for >2 frames, or to carry padding). Discards
-            // whatever the branch above wrote for *this* packet, not anything
-            // already in the caller's buffer.
-            out.truncate(start);
-            let vbr = lens.iter().any(|&l| l != lens[0]);
-            if vbr {
-                out.push((self.toc & 0xfc) | 0x3);
-                out.push((count as u8) | 0x80);
-            } else {
-                out.push((self.toc & 0xfc) | 0x3);
-                out.push(count as u8);
-            }
-            // Compute current size to know the padding amount.
-            let mut tot = 2usize;
-            if vbr {
-                for &l in lens.iter().take(count - 1) {
-                    tot += 1 + usize::from(l >= 252) + l;
-                }
-                tot += lens[count - 1];
-            } else {
-                tot += count * lens[0];
-            }
-            let pad_amount = pad_to.map(|n| n.saturating_sub(tot)).unwrap_or(0);
-            if pad_amount != 0 {
-                out[1] |= 0x40; // padding flag
-                let nb_255s = (pad_amount - 1) / 255;
-                out.extend(std::iter::repeat_n(255u8, nb_255s));
-                out.push((pad_amount - 255 * nb_255s - 1) as u8);
-            }
-            if vbr {
-                for &l in lens.iter().take(count - 1) {
-                    encode_size(l as i32, out);
-                }
-            }
-            if self_delimited {
-                encode_size(lens[count - 1] as i32, out);
-            }
-            for f in &self.frames[begin..end] {
-                out.extend_from_slice(f);
-            }
-            if let Some(n) = pad_to {
-                while out.len() - start < n {
-                    out.push(0);
-                }
-            }
-            return Ok(());
+        let pad_amount = pad_to.map(|n| n.saturating_sub(tot)).unwrap_or(0);
+        if pad_amount != 0 {
+            out[start + 1] |= 0x40; // padding flag
+            let nb_255s = (pad_amount - 1) / 255;
+            out.extend(std::iter::repeat_n(255u8, nb_255s));
+            out.push((pad_amount - 255 * nb_255s - 1) as u8);
         }
-
+        if vbr {
+            for l in lens().take(count - 1) {
+                encode_size(l as i32, out);
+            }
+        }
         if self_delimited {
-            encode_size(lens[count - 1] as i32, out);
+            encode_size(last_len as i32, out);
         }
-        for f in &self.frames[begin..end] {
+        for f in frames.clone() {
             out.extend_from_slice(f);
         }
-        Ok(())
+        if let Some(n) = pad_to {
+            while out.len() - start < n {
+                out.push(0);
+            }
+        }
+        return Ok(());
     }
+
+    if self_delimited {
+        encode_size(last_len as i32, out);
+    }
+    for f in frames.clone() {
+        out.extend_from_slice(f);
+    }
+    Ok(())
 }
 
 /// opus_packet_pad: grow `packet` in place to `new_len` bytes by adding opus
@@ -512,6 +536,31 @@ mod tests {
         assert_eq!(&s0[1..], &f0[..]);
         let s1 = rp.out_range(1, 2).unwrap();
         assert_eq!(&s1[1..], &f1[..]);
+    }
+
+    // The multistream un-delimiter must produce exactly what the repacketizer
+    // does for the same frames, in every packet code, and must not keep
+    // whatever `out` held before.
+    #[test]
+    fn take_self_delimited_matches_the_repacketizer() {
+        let toc = 12u8 << 3; // hybrid SWB 10 ms, so three frames fit in 120 ms
+        let cases: &[&[usize]] = &[&[3], &[4, 4], &[3, 5], &[4, 4, 4], &[3, 5, 4], &[300, 2]];
+        for lens in cases {
+            let mut rp = Repacketizer::new();
+            for (i, &l) in lens.iter().enumerate() {
+                let mut pkt = vec![toc];
+                pkt.extend(std::iter::repeat_n(i as u8 + 1, l));
+                rp.cat(&pkt).unwrap();
+            }
+            let mut sd = rp.out_self_delimited().unwrap();
+            let trailer = [0xEEu8; 7]; // the next stream, which must be left alone
+            sd.extend_from_slice(&trailer);
+
+            let mut out = vec![0xFF; 3];
+            let consumed = take_self_delimited_into(&sd, &mut out).unwrap();
+            assert_eq!(consumed, sd.len() - trailer.len(), "lens {lens:?}");
+            assert_eq!(out, rp.out().unwrap(), "lens {lens:?}");
+        }
     }
 
     #[test]

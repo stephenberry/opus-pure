@@ -210,7 +210,7 @@ impl MdctLookup {
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
-            if std::arch::is_x86_feature_detected!("avx") {
+            if super::have_avx() {
                 mdct_tdac_avx(output, window, overlap);
             } else {
                 mdct_tdac_scalar(output, window, overlap);
@@ -348,6 +348,15 @@ fn mdct_backward_post_rotation_scalar(
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx")]
+#[inline]
+unsafe fn reverse_ps_avx(v: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+    let swapped = _mm256_permute2f128_ps(v, v, 0x01);
+    _mm256_shuffle_ps(swapped, swapped, 0b00_01_10_11)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx")]
 unsafe fn mdct_tdac_avx(output: &mut [f32], window: &[f32], overlap: usize) {
     use std::arch::x86_64::*;
 
@@ -362,28 +371,22 @@ unsafe fn mdct_tdac_avx(output: &mut [f32], window: &[f32], overlap: usize) {
 
     while i + 8 <= overlap2 {
         let x2 = _mm256_loadu_ps(output.as_ptr().add(i));
+        let rev_idx = overlap - 8 - i;
 
-        let mut x1_tmp = [0f32; 8];
-        let mut w2_tmp = [0f32; 8];
-        for j in 0..8 {
-            x1_tmp[j] = output[overlap - 1 - (i + j)];
-            w2_tmp[j] = window[overlap - 1 - (i + j)];
-        }
-        let x1 = _mm256_loadu_ps(x1_tmp.as_ptr());
+        let x1_direct = _mm256_loadu_ps(output.as_ptr().add(rev_idx));
+        let x1 = reverse_ps_avx(x1_direct);
 
         let w1 = _mm256_loadu_ps(window.as_ptr().add(i));
-        let w2 = _mm256_loadu_ps(w2_tmp.as_ptr());
+        let w2_direct = _mm256_loadu_ps(window.as_ptr().add(rev_idx));
+        let w2 = reverse_ps_avx(w2_direct);
 
         let out_fwd = _mm256_sub_ps(_mm256_mul_ps(x2, w2), _mm256_mul_ps(x1, w1));
         let out_rev = _mm256_add_ps(_mm256_mul_ps(x2, w1), _mm256_mul_ps(x1, w2));
 
         _mm256_storeu_ps(output.as_mut_ptr().add(i), out_fwd);
 
-        let mut out_rev_tmp = [0f32; 8];
-        _mm256_storeu_ps(out_rev_tmp.as_mut_ptr(), out_rev);
-        for j in 0..8 {
-            output[overlap - 1 - (i + j)] = out_rev_tmp[j];
-        }
+        let out_rev_stored = reverse_ps_avx(out_rev);
+        _mm256_storeu_ps(output.as_mut_ptr().add(rev_idx), out_rev_stored);
 
         i += 8;
     }

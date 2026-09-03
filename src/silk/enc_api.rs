@@ -437,7 +437,7 @@ pub fn silk_encode_frame(
                 if let Some(rc_c2) = &rc_copy2 {
                     *rc = rc_c2.clone();
                     let offs = rc.offs as usize;
-                    rc.buf[..offs].copy_from_slice(&ec_buf_copy[..offs]);
+                    rc.buf_mut()[..offs].copy_from_slice(&ec_buf_copy[..offs]);
                 }
                 if let Some(nsq_c2) = &nsq_copy2 {
                     ps_enc.s_nsq = *nsq_c2;

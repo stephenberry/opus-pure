@@ -9,12 +9,12 @@ use crate::range_coder::tell_frac_inline;
 
 const MIN_STEREO_ENERGY: f32 = 1e-10;
 
-pub struct BandCtx<'a> {
+pub struct BandCtx<'a, 'b> {
     pub encode: bool,
     pub m: &'a CeltMode,
     pub i: usize,
     pub band_e: &'a [f32],
-    pub rc: &'a mut RangeCoder,
+    pub rc: &'a mut RangeCoder<'b>,
     pub spread: i32,
     pub remaining_bits: i32,
     pub resynth: bool,
