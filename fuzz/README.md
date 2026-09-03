@@ -8,6 +8,7 @@ Every other directory in this repository asks whether the codec is *right*. This
 cargo test --test fuzz_corpus -- --ignored write_fuzz_seeds   # once, writes corpus/
 cargo +nightly fuzz run decode_stream -j 6
 cargo +nightly fuzz run ogg_read -j 6
+cargo +nightly fuzz run caf_read -j 6
 cargo +nightly fuzz run packet_shape -j 6
 ```
 
@@ -17,6 +18,7 @@ Nightly is `cargo-fuzz`'s requirement, not the library's: `-Z sanitizer=address`
 | --- | --- | --- |
 | `decode_stream` | a configuration byte, then length-prefixed packets | the decoder, across a whole stream: LTP and LPC history, overlap-add, the resampler, mode switches, concealment, in-band FEC |
 | `ogg_read` | an Ogg Opus file | page headers, the segment table, lacing, `OpusHead`, `OpusTags`, and then the decoder on whatever comes out |
+| `caf_read` | a Core Audio Format file | the chunk walk, the `desc` chunk, the packet table in each of its shapes, and then the decoder on whatever comes out |
 | `packet_shape` | one packet | `packet::{samples, frame_count, channels, mode, bandwidth}`, `repacketizer::{Repacketizer, pad_packet, unpad_packet}`, and the self-delimited framing by way of `OpusMSDecoder` |
 
 ## The bodies are not here

@@ -2,6 +2,11 @@
 
 Notable changes to this crate, newest first. Nothing is recorded here from before the first public release; what this crate changed relative to the fork it came from is described in [ATTRIBUTION.md](ATTRIBUTION.md).
 
+## Unreleased
+
+- **Core Audio Format (`.caf`) mux and demux.** iOS and macOS record and play Opus only inside CAF, and nothing else reads one; `CafOpusReader` and `CafOpusWriter` present the Ogg pair's API over that container, so a recording moves between the two packet for packet, without decoding. The packet table's priming and remainder frames carry across as pre-skip and end-trim, so the gapless recipe works unchanged. Files written here decode through Apple's tools to the sample; a recording from Apple's encoder is in `tests/fixtures/` and read in CI. Mono and stereo.
+- `Error::InvalidStream` now covers both containers, and its message no longer names Ogg.
+
 ## 0.2.1 — 2026-08-31
 
 - **`Trim::keep_range`** returns the same cut as `keep`, as indices into the decoded PCM, for a playback path that has to hold its position across buffer fills — a borrowed slice cannot, and the trimmed length alone does not say where the audio starts. The README shows the pattern.

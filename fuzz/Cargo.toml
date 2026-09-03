@@ -1,8 +1,9 @@
 # Coverage-guided fuzzing of everything that reads bytes this crate did not
-# write: the decoder, the Ogg container parser, and the packet inspectors.
+# write: the decoder, the Ogg and CAF container parsers, and the packet inspectors.
 #
 #   cargo +nightly fuzz run decode_stream
 #   cargo +nightly fuzz run ogg_read
+#   cargo +nightly fuzz run caf_read
 #   cargo +nightly fuzz run packet_shape
 #
 # A package of its own rather than a workspace member, like `reference/rust`:
@@ -36,6 +37,13 @@ bench = false
 [[bin]]
 name = "ogg_read"
 path = "fuzz_targets/ogg_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "caf_read"
+path = "fuzz_targets/caf_read.rs"
 test = false
 doc = false
 bench = false

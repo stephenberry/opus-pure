@@ -23,7 +23,7 @@
 // so from inside the fuzz crate the other two always look unused.
 #![allow(dead_code)]
 
-use opus_pure::{OggOpusReader, OpusDecoder, OpusMSDecoder, packet, repacketizer};
+use opus_pure::{CafOpusReader, OggOpusReader, OpusDecoder, OpusMSDecoder, packet, repacketizer};
 
 /// The rates a fuzzed configuration byte can select, one per value of its low
 /// two bits. 12 kHz is left out only because two bits hold four values; it is
@@ -165,6 +165,61 @@ pub fn ogg_read(data: &[u8]) {
             _ => unreachable!("one of the two decoders was built above"),
         };
         let Ok(n) = produced else { continue };
+        assert!(
+            n <= frame_size,
+            "decode reported {n} samples into a buffer holding {frame_size}"
+        );
+        assert!(
+            pcm[..n * channels].iter().all(|s| s.is_finite()),
+            "a packet from the container decoded to a non-finite sample"
+        );
+    }
+}
+
+/// Read `data` as a Core Audio Format file and decode every packet it yields.
+///
+/// The CAF path has no checksum to reseal: every mutation reaches the chunk
+/// walk and the packet table directly. What the table promises is checked
+/// against the file before a packet is read, so the assertions here are about
+/// the reader keeping those promises — no more packets than the table
+/// accounted for, none of them empty, and the last one flagged.
+pub fn caf_read(data: &[u8]) {
+    let Ok(mut reader) = CafOpusReader::new(std::io::Cursor::new(data)) else {
+        return;
+    };
+    let head = reader.head().clone();
+    let channels = head.channel_count as usize;
+    let Ok(mut dec) = OpusDecoder::new(48_000, channels) else {
+        return;
+    };
+
+    // The table was checked against the data chunk, and every packet is at
+    // least one byte of it, so the count cannot exceed the input.
+    let count = reader.packet_count();
+    assert!(
+        count <= data.len(),
+        "the reader accepted a table of {count} packets from {} bytes",
+        data.len()
+    );
+
+    let frame_size = 48 * MAX_PACKET_MS;
+    let mut pcm = vec![0.0f32; frame_size * channels];
+    let mut packets = 0usize;
+    while let Ok(Some(pkt)) = reader.read_packet() {
+        packets += 1;
+        assert!(
+            packets <= count,
+            "the reader produced more packets than its table"
+        );
+        assert!(!pkt.data.is_empty(), "the reader yielded an empty packet");
+        assert_eq!(
+            pkt.end_of_stream,
+            packets == count,
+            "end_of_stream on packet {packets} of {count}"
+        );
+        let Ok(n) = dec.decode(&pkt.data, frame_size, &mut pcm) else {
+            continue;
+        };
         assert!(
             n <= frame_size,
             "decode reported {n} samples into a buffer holding {frame_size}"

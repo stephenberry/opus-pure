@@ -8,6 +8,7 @@ It reads and writes `.opus` files, and it encodes and decodes raw Opus packets f
 
 - **A complete codec.** Encoder *and* decoder for all three Opus modes — SILK for speech, CELT for music, and the hybrid of both — at 8, 12, 16, 24 and 48 kHz, mono and stereo, at every one of the nine Opus frame sizes.
 - **A real container.** Ogg mux *and* demux, with `OpusHead`, `OpusTags`, page CRCs and correct granule positions. Files it writes pass `opusinfo` and decode with `opusdec`; files `opusenc` writes read back through this crate.
+- **Apple's container too.** Core Audio Format (`.caf`) mux and demux, which is the only way iOS and macOS record or play Opus. A recording from an iPhone becomes an `.opus` file, or the reverse, without decoding a sample. See [Apple's container](#apples-container-caf).
 - **Checked against the C library.** Byte-exact with libopus 1.6.1 everywhere the format allows it, and measured against it everywhere it does not. See [Correctness](#correctness).
 - **Fast.** Encoding runs 1.1–1.8x libopus on the same machine and the same audio; decoding runs at 0.84–1.02x of it. See [Speed](#speed).
 
@@ -250,6 +251,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `MAX_PACKET_BYTES` is large enough for any packet at any setting. A smaller buffer is not an error: like libopus's `max_data_bytes`, `output.len()` is the encoder's *byte budget* for this packet, and a tight one produces a smaller packet rather than a failure.
 
+### Apple's container: `.caf`
+
+iOS and macOS encode and decode Opus natively, but only inside Core Audio Format files: `AVAudioRecorder` asked for Opus writes a `.caf`, and nothing on Apple's platforms plays an Ogg `.opus`. Everywhere else it is the reverse. The packets inside are the same, so crossing that line is a change of framing rather than a re-encode, and [`CafOpusReader`](https://docs.rs/opus-pure/latest/opus_pure/struct.CafOpusReader.html) and [`CafOpusWriter`](https://docs.rs/opus-pure/latest/opus_pure/struct.CafOpusWriter.html) present the Ogg pair's API over a `.caf`. Every recipe above works with the type changed — including the gapless one, since CAF's priming and remainder frames are RFC 7845's pre-skip and end-trim under other names — and this is the whole of a conversion in either direction:
+
+```rust
+use opus_pure::{CafOpusReader, OggOpusWriter, Result};
+use std::io::{Read, Seek, Write};
+
+/// Turn an iPhone recording into an `.opus` file, packet for packet.
+fn caf_to_ogg<R: Read + Seek, W: Write>(source: R, sink: W) -> Result<W> {
+    let mut reader = CafOpusReader::new(source)?;
+    let mut writer = OggOpusWriter::new(sink, reader.head().clone())?;
+    let mut packets = reader.packets().peekable();
+    while let Some(packet) = packets.next() {
+        let packet = packet?;
+        if packets.peek().is_none() {
+            // The last packet states where the audio ends, which may be short
+            // of what it decodes to; that is the end-trim, carried across.
+            let duration = packet.page_granule - writer.granule();
+            writer.write_packet_with_duration(&packet.data, duration as u32)?;
+        } else {
+            writer.write_packet(&packet.data)?;
+        }
+    }
+    writer.finish()
+}
+```
+
+Swap the two types and it is the reverse, producing a file `AVAudioPlayer` plays. The CAF types need `Seek` where the Ogg ones do not, because the packet table is a chunk that may sit on either side of the audio. Files written here decode through Apple's own tools to the sample, and recordings from Apple's encoder read back the same way; `tests/fixtures/` carries one. Mono and stereo only, which is every file Apple's recorder makes.
+
 ### If your samples are `i16`
 
 Most audio in flight is 16-bit, so both directions have an integer entry point that takes and returns `i16` directly:
@@ -332,7 +363,7 @@ One encoder can change frame size between calls: pass a different `frame_size` a
 | Coding modes | SILK, CELT, hybrid, chosen automatically from bitrate and content |
 | Rates | 8, 12, 16, 24, 48 kHz; mono and stereo |
 | Stereo | Adaptive mid/side in SILK and hybrid, full stereo in CELT |
-| Container | Ogg mux **and** demux — `OpusHead`, `OpusTags`, page CRCs, granule positions, multi-page packets |
+| Containers | Ogg mux **and** demux — `OpusHead`, `OpusTags`, page CRCs, granule positions, multi-page packets. Core Audio Format (`.caf`) mux and demux, for Apple's platforms |
 | Frame sizes | 2.5 to 120 ms, packed as one frame or several per packet as the mode requires |
 | Sample format | 32-bit float **and** 16-bit integer, both directions |
 | Rate control | VBR, constrained VBR and CBR |
