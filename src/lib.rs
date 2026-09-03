@@ -1,8 +1,10 @@
-//! Pure-Rust Opus audio codec (RFC 6716) with Ogg encapsulation (RFC 7845).
+//! Pure-Rust Opus audio codec (RFC 6716) with Ogg (RFC 7845) and Core Audio
+//! Format encapsulation.
 //!
 //! Encoder and decoder for all three Opus coding modes — SILK for speech, CELT
-//! for music, and the hybrid of both — plus a real Ogg container layer, so this
-//! crate reads and writes `.opus` files rather than only raw packets.
+//! for music, and the hybrid of both — plus real container layers, so this
+//! crate reads and writes `.opus` files, and Apple's `.caf`, rather than only
+//! raw packets.
 //!
 //! # Encoding to an `.opus` file
 //!
@@ -119,6 +121,15 @@
 //! 312, which is four milliseconds too many for
 //! [`Application::RestrictedLowDelay`].
 //!
+//! # Apple's container
+//!
+//! Apple's audio frameworks record and play Opus only inside Core Audio Format
+//! files, which little outside Apple's platforms reads; everything else uses
+//! Ogg, which those frameworks do not. The packets are the same either way.
+//! [`CafOpusReader`] and [`CafOpusWriter`] present the Ogg pair's API over a
+//! `.caf` file, and the [`caf`] module shows the ten-line loop that moves a
+//! recording from one container to the other without decoding it.
+//!
 //! # Working with raw packets
 //!
 //! [`OpusEncoder`] and [`OpusDecoder`] are usable on their own when the framing
@@ -148,6 +159,7 @@
 struct Readme;
 
 // ---- Public API ----
+pub mod caf;
 mod config;
 mod decoder;
 mod encoder;
@@ -188,6 +200,7 @@ pub mod probe {
     pub const CELT_BAND_EDGES_200HZ: [i16; 22] = crate::celt::modes::EBAND_5MS;
 }
 
+pub use caf::{CafOpusReader, CafOpusWriter};
 pub use config::{Application, Bandwidth, OpusMode, RateControl, Signal};
 pub use decoder::OpusDecoder;
 pub use encoder::{MAX_PACKET_BYTES, OpusEncoder};
