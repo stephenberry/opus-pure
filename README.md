@@ -253,7 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Apple's container: `.caf`
 
-iOS and macOS encode and decode Opus natively, but only inside Core Audio Format files: `AVAudioRecorder` asked for Opus writes a `.caf`, and nothing on Apple's platforms plays an Ogg `.opus`. Everywhere else it is the reverse. The packets inside are the same, so crossing that line is a change of framing rather than a re-encode, and [`CafOpusReader`](https://docs.rs/opus-pure/latest/opus_pure/struct.CafOpusReader.html) and [`CafOpusWriter`](https://docs.rs/opus-pure/latest/opus_pure/struct.CafOpusWriter.html) present the Ogg pair's API over a `.caf`. Every recipe above works with the type changed — including the gapless one, since CAF's priming and remainder frames are RFC 7845's pre-skip and end-trim under other names — and this is the whole of a conversion in either direction:
+Apple's audio frameworks encode and decode Opus natively, but only inside Core Audio Format files: `AVAudioRecorder` asked for Opus writes a `.caf`, and `AVAudioPlayer` will not open an Ogg `.opus`. Almost everywhere else it is the reverse. The packets inside are the same, so crossing that line is a change of framing rather than a re-encode, and [`CafOpusReader`](https://docs.rs/opus-pure/latest/opus_pure/struct.CafOpusReader.html) and [`CafOpusWriter`](https://docs.rs/opus-pure/latest/opus_pure/struct.CafOpusWriter.html) present the Ogg pair's API over a `.caf`. Every recipe above works with the type changed — including the gapless one, since CAF's priming and remainder frames are RFC 7845's pre-skip and end-trim under other names — and this is the whole of a conversion in either direction:
 
 ```rust
 use opus_pure::{CafOpusReader, OggOpusWriter, Result};

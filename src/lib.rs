@@ -123,12 +123,12 @@
 //!
 //! # Apple's container
 //!
-//! iOS and macOS record and play Opus natively, but only inside Core Audio
-//! Format files, which nothing else reads; everything else uses Ogg, which
-//! Apple does not. The packets are the same either way. [`CafOpusReader`] and
-//! [`CafOpusWriter`] present the Ogg pair's API over a `.caf` file, and the
-//! [`caf`] module shows the ten-line loop that moves a recording from one
-//! container to the other without decoding it.
+//! Apple's audio frameworks record and play Opus only inside Core Audio Format
+//! files, which little outside Apple's platforms reads; everything else uses
+//! Ogg, which those frameworks do not. The packets are the same either way.
+//! [`CafOpusReader`] and [`CafOpusWriter`] present the Ogg pair's API over a
+//! `.caf` file, and the [`caf`] module shows the ten-line loop that moves a
+//! recording from one container to the other without decoding it.
 //!
 //! # Working with raw packets
 //!
