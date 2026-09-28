@@ -2,7 +2,7 @@
 
 Notable changes to this crate, newest first. Nothing is recorded here from before the first public release; what this crate changed relative to the fork it came from is described in [ATTRIBUTION.md](ATTRIBUTION.md).
 
-## Unreleased
+## 0.2.2 — 2026-09-28
 
 - **Reading and decoding a stream no longer allocate once warm**, including at a loop point. The range decoder borrows the packet instead of copying it, tonality analysis keeps its downmix scratch in the encoder state, the multistream decoder rebuilds each stream's packet into one reused buffer, a packet's frame table is held inline, and the Ogg reader reassembles packets in one reused buffer. `tests/ogg_playback_alloc.rs` holds a looping playback to zero allocations after its first pass.
 - **`OggOpusReader::read_packet_into`** fills an `OggPacket` the caller keeps, where `read_packet` returns a new one. `OggPacket::default()` is the empty one to start from.
