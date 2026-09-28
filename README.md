@@ -159,7 +159,7 @@ A decoded Opus stream is longer than the audio that went into it at both ends, a
 A file read all at once can take `Trim::keep` and its slice. A player cannot: the audio device asks for however many samples it wants, whenever it wants them, and what is left of the last packet has to survive until the next call. [`keep_range`](https://docs.rs/opus-pure/latest/opus_pure/struct.Trim.html#method.keep_range) is `keep` as indices for exactly that. The trimmed length alone does not say where the audio starts, because the pre-skip cuts the front and the end-trim the back.
 
 ```rust
-use opus_pure::{MAX_PACKET_SAMPLES, OggOpusReader, OpusDecoder, Result, Trim};
+use opus_pure::{MAX_PACKET_SAMPLES, OggOpusReader, OggPacket, OpusDecoder, Result, Trim};
 use std::io::Read;
 use std::ops::Range;
 
@@ -168,6 +168,8 @@ struct Playback<R: Read> {
     decoder: OpusDecoder,
     trim: Trim,
     channels: usize,
+    /// One packet, read. Kept so each read reuses its buffer.
+    packet: OggPacket,
     /// One packet, decoded.
     block: Vec<f32>,
     /// The part of `block` that is audio and has not been handed out yet.
@@ -182,6 +184,7 @@ impl<R: Read> Playback<R> {
         Ok(Self {
             decoder: reader.head().decoder(rate)?,
             trim: Trim::new(reader.head(), rate, channels)?,
+            packet: OggPacket::default(),
             block: vec![0.0f32; MAX_PACKET_SAMPLES * channels],
             channels,
             pending: 0..0,
@@ -197,14 +200,14 @@ impl<R: Read> Playback<R> {
             while self.pending.is_empty() {
                 // A packet can trim to nothing — the pre-skip covers the whole
                 // of it, or the end-trim already fell — so this loops.
-                let Some(packet) = self.reader.read_packet()? else {
+                if !self.reader.read_packet_into(&mut self.packet)? {
                     out[written..].fill(0.0); // the device's buffer arrives dirty
                     return Ok(written);
-                };
+                }
                 let n = self
                     .decoder
-                    .decode(&packet.data, MAX_PACKET_SAMPLES, &mut self.block)?;
-                self.pending = self.trim.keep_range(&packet, n * self.channels);
+                    .decode(&self.packet.data, MAX_PACKET_SAMPLES, &mut self.block)?;
+                self.pending = self.trim.keep_range(&self.packet, n * self.channels);
             }
             let take = (out.len() - written).min(self.pending.len());
             let src = self.pending.start..self.pending.start + take;
@@ -217,7 +220,7 @@ impl<R: Read> Playback<R> {
 }
 ```
 
-Nothing is staged in between: the decode buffer is the staging buffer, and each sample is written once, straight into the device's buffer. Give the decoder a `reset_state()` and the `Trim` a fresh instance if the source is rewound to loop.
+Nothing is staged in between: the decode buffer is the staging buffer, and each sample is written once, straight into the device's buffer. Nothing is allocated either, once the stream's largest page and packet have been through: `read_packet_into` reuses the kept packet, which matters on an audio thread, where an allocation can take a lock. To loop over a source that can seek (`R: Read + Seek`), call `reader.rewind()` at the end of the stream, give the decoder a `reset_state()` and the `Trim` a fresh instance; none of the three allocates, so a loop that has played through once allocates nothing on later passes.
 
 ### Raw packets, without the container
 
@@ -323,7 +326,7 @@ One encoder can change frame size between calls: pass a different `frame_size` a
 - **Repacketizing.** `Repacketizer` merges consecutive packets into one and splits them back apart, including the self-delimiting framing RFC 6716 Appendix B defines.
 - **Packet loss.** `decode` on an empty slice runs concealment. If the encoder had `use_inband_fec` on, `decode_fec` recovers part of a lost frame from the packet *after* it.
 - **Parallel encoding.** `encode_parallel` splits a clip across threads. It is an opt-in path with a documented cost; see [Known limitations](#known-limitations).
-- **Looping a file.** `OggOpusReader` reads forward only. To play a stream again, take the source back with `into_inner`, `rewind` it, and build a new reader over it — the constructor re-reads only the two header pages. Give the decoder a `reset_state()` and the `Trim` a fresh instance at the same time, or the seam carries the previous pass's state. See [Known limitations](#known-limitations) for why this is not a `seek`.
+- **Looping a file.** `OggOpusReader::rewind` goes back to the first audio packet of a source that can seek, without reading the header pages again. Give the decoder a `reset_state()` and the `Trim` a fresh instance at the same time, or the seam carries the previous pass's state. See [Known limitations](#known-limitations) for why there is no `seek` to an arbitrary point.
 
 ## What's here
 
@@ -415,7 +418,7 @@ Those numbers, how the comparison is kept fair, why libopus needs two columns ra
 
 - **The decoder's float output is not bounded by ±1**, matching libopus: codec ringing carries samples slightly past it. `decode_s16` handles this for you, and `SoftClip` is there for callers who want the float output and convert it themselves. Only a caller who takes the float and ignores both needs to do anything.
 - **Chunk-parallel encoding is not the serial encode.** `encode_parallel` splits a clip across threads and primes each worker by re-encoding the audio before its chunk, which converges the encoder's state but never exactly: at a chunk boundary one packet was produced by an encoder that did not produce the packet before it, and the rate controllers on either side hold different state. Fully primed, the worst frame lands about 4 dB below a serial encode's; constant bitrate removes nearly all of it. Priming is also redundant work, so the worker count is capped at one per 8 s of audio — `ParallelConfig::plan` reports both before any encoding happens. It is an opt-in path for that reason. See [reference/parallel/](reference/parallel/).
-- **The Ogg reader has no `seek`.** It reads forward from the first packet. Starting again from the beginning is cheap — `into_inner`, rewind the source, construct a new reader — but seeking to an arbitrary point is not offered at all, rather than offered badly: RFC 7845 §4.2 wants roughly 80 ms decoded and discarded before the target, and a seek without that pre-roll lands on a cold decoder and audibly clicks, which is exactly the artifact a seeking player is trying to avoid.
+- **The Ogg reader seeks only to the start.** It reads forward from the first packet, and `rewind` goes back to it cheaply, but seeking to an arbitrary point is not offered at all, rather than offered badly: RFC 7845 §4.2 wants roughly 80 ms decoded and discarded before the target, and a seek without that pre-roll lands on a cold decoder and audibly clicks, which is exactly the artifact a seeking player is trying to avoid.
 - **CELT concealment is not bit-exact**, and cannot be: it extrapolates the last pitch period through a 24th-order LPC fit, and that fit turns the last-bit differences in a 1024-sample autocorrelation into coefficient differences a thousand times larger. Concealed CELT frames agree with libopus to 83–112 dB where an ordinary CELT frame agrees to 139. Concealment also feeds the 5 ms cross-fade at a mode switch, so a stream that changes mode differs there by the same amount.
 
 ## License

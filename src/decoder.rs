@@ -670,13 +670,79 @@ impl OpusDecoder {
     /// begins by blending into the end of the first.
     ///
     /// Equivalent to building a new decoder with the same sample rate and
-    /// channel count, and carrying [`gain_q8`](Self::gain_q8) across. As on the
-    /// encoder, it re-initialises rather than rewinds, so it is not free.
+    /// channel count, and carrying [`gain_q8`](Self::gain_q8) across. It resets
+    /// in place and allocates nothing, so a player can call it at every loop
+    /// point.
     pub fn reset_state(&mut self) -> Result<()> {
-        let gain_q8 = self.gain_q8;
-        let mut fresh = Self::new(self.sampling_rate, self.channels)?;
-        fresh.gain_q8 = gain_q8;
-        *self = fresh;
+        // Exhaustive, so a field added to the decoder does not compile until
+        // this says how it resets. Each is set to what `new` gives it.
+        let Self {
+            #[cfg(feature = "probe")]
+            probe_silk_bits,
+            #[cfg(feature = "probe")]
+            probe_total_bits,
+            celt_dec,
+            silk_dec,
+            sampling_rate,
+            channels,
+            prev_mode,
+            frame_size,
+            stream_channels,
+            silk_resampler,
+            silk_resampler_r,
+            prev_internal_rate,
+            softclip,
+            w_pcm_f32,
+            w_pcm_i16,
+            w_silk_out,
+            w_pcm_resampled,
+            w_celt_out,
+            silk_s_mid,
+            last_range,
+            gain_q8: _,
+            prev_redundancy,
+            silk_internal_rate,
+            celt_end_band,
+            w_transition,
+            w_plc,
+            w_plc_celt,
+        } = self;
+        #[cfg(feature = "probe")]
+        {
+            *probe_silk_bits = 0;
+            *probe_total_bits = 0;
+        }
+        // The rate and channel count are settings, as is the CELT downsample
+        // factor derived from the rate, which `reset` keeps.
+        celt_dec.reset();
+        celt_dec.set_stream_channels(*channels);
+        // The SILK decoder holds no heap memory, so a new one costs no
+        // allocation.
+        *silk_dec = silk::dec_api::SilkDecoder::new();
+        silk_dec.init((*sampling_rate).min(16000), *channels as i32);
+        silk_dec.channel_state[0].fs_api_hz = *sampling_rate;
+        *prev_mode = None;
+        *frame_size = 0;
+        *stream_channels = *channels;
+        *silk_resampler = silk::resampler::SilkResampler::default();
+        *silk_resampler_r = silk::resampler::SilkResampler::default();
+        *prev_internal_rate = 0;
+        softclip.reset();
+        *silk_s_mid = [0; 2];
+        *last_range = 0;
+        *prev_redundancy = false;
+        *silk_internal_rate = 16_000;
+        *celt_end_band = 21;
+        // Scratch starts as `new` leaves it, zeroed or empty, with its
+        // capacity kept.
+        w_pcm_i16.fill(0);
+        w_silk_out.fill(0.0);
+        w_pcm_resampled.fill(0);
+        w_celt_out.fill(0.0);
+        w_pcm_f32.clear();
+        w_transition.clear();
+        w_plc.clear();
+        w_plc_celt.clear();
         Ok(())
     }
 
@@ -869,8 +935,7 @@ impl OpusDecoder {
         }
 
         let (_, frames, _) = crate::repacketizer::parse_packet(packet, false)?;
-        let (off, len) = frames[0];
-        let payload = &packet[off..off + len];
+        let payload = frames[0];
 
         let bandwidth = bandwidth_from_toc(toc);
         let packet_channels = channels_from_toc(toc);
@@ -1020,12 +1085,8 @@ impl OpusDecoder {
         // here had drifted from it, accepting frames past the 1275-byte limit
         // of RFC 6716 §3.4 and rejecting the zero-length DTX frames of a code 1
         // packet that libopus accepts.
-        let (_, frame_ranges, _) = repacketizer::parse_packet(input, false)?;
-        let frame_count = frame_ranges.len();
-        let frame_payloads: Vec<&[u8]> = frame_ranges
-            .iter()
-            .map(|&(off, len)| &input[off..off + len])
-            .collect();
+        let (_, frame_payloads, _) = repacketizer::parse_packet(input, false)?;
+        let frame_count = frame_payloads.len();
 
         // libopus opus_decoder.c opus_decode_native:
         //   if (count*packet_frame_size > frame_size)
