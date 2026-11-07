@@ -4455,19 +4455,19 @@ mod tests {
             // entries go through the crate's own predicates instead of
             // repeating their definitions, so this cannot drift away from what
             // the dispatch sites actually test.
-            if std::arch::is_x86_feature_detected!("sse2") {
-                available.push("sse2");
-            }
             if std::arch::is_x86_feature_detected!("avx") {
                 available.push("avx");
             }
             if have_avx_fma() {
                 available.push("avx-fma");
             }
-            // The AVX2 kernels are x86-64 only, so on 32-bit x86 these names
-            // would claim kernels that are not compiled in.
+            // The SSE2 and AVX2 kernels are x86-64 only, so on 32-bit x86
+            // these names would claim kernels that are not compiled in.
             #[cfg(target_arch = "x86_64")]
             {
+                if std::arch::is_x86_feature_detected!("sse2") {
+                    available.push("sse2");
+                }
                 if std::arch::is_x86_feature_detected!("avx2") {
                     available.push("avx2");
                 }

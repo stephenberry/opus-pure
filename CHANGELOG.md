@@ -4,7 +4,7 @@ Notable changes to this crate, newest first. Nothing is recorded here from befor
 
 ## Unreleased
 
-- **Builds for 32-bit x86 again** (`i686-linux-android` and others). The x86 kernels imported `std::arch::x86_64`, which that target lacks.
+- **Builds for 32-bit x86** (`i686-linux-android` and others). The x86 kernels imported `std::arch::x86_64`, which that target lacks.
 
 ## 0.2.2 — 2026-09-28
 

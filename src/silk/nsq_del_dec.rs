@@ -196,7 +196,7 @@ unsafe fn silk_lpc_prediction_avx2(
     a_q12: &[i16],
     predict_lpc_order: i32,
 ) -> i32 {
-    use core::arch::x86_64::*;
+    use crate::x86_intrinsics::*;
 
     let order = predict_lpc_order as usize;
     let lpc = ps_lpc_q14.as_ptr();
@@ -355,7 +355,7 @@ unsafe fn nsq_shape_filter_soa_avx2(
     base: i32,
     n_ar: &mut [i32; 4],
 ) {
-    use core::arch::x86_64::*;
+    use crate::x86_intrinsics::*;
     let wb = _mm256_set1_epi64x(warp as i64);
     let asr16 = |x: __m256i| {
         let s = _mm256_cmpgt_epi64(_mm256_setzero_si256(), x);

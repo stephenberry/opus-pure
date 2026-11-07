@@ -791,7 +791,7 @@ fn warped_corr_avx2_enabled() -> bool {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn warped_corr_update_avx2(corr_qc: &mut [i64], state_qs: &[i32], order: usize) {
-    use core::arch::x86_64::*;
+    use crate::x86_intrinsics::*;
 
     // The kernel updates `order + 1` correlation lags against the same number
     // of state slots; trimming both here is what puts the loads and stores
