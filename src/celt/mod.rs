@@ -40,8 +40,9 @@ pub(crate) fn have_avx_fma() -> bool {
     })
 }
 
-/// Companion to [`have_avx_fma`] for kernels declared `avx2,fma`.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+/// Companion to [`have_avx_fma`] for kernels declared `avx2,fma`, all of
+/// which are x86-64 only.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub(crate) fn have_avx2_fma() -> bool {
     static CACHE: FeatureCache = FeatureCache::new();
@@ -4463,11 +4464,16 @@ mod tests {
             if have_avx_fma() {
                 available.push("avx-fma");
             }
-            if std::arch::is_x86_feature_detected!("avx2") {
-                available.push("avx2");
-            }
-            if have_avx2_fma() {
-                available.push("avx2-fma");
+            // The AVX2 kernels are x86-64 only, so on 32-bit x86 these names
+            // would claim kernels that are not compiled in.
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::arch::is_x86_feature_detected!("avx2") {
+                    available.push("avx2");
+                }
+                if have_avx2_fma() {
+                    available.push("avx2-fma");
+                }
             }
         }
 

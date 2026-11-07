@@ -1,4 +1,4 @@
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use super::have_avx2_fma;
 use crate::celt::modes::CeltMode;
 use crate::celt::pvq::*;

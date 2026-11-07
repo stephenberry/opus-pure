@@ -1,4 +1,4 @@
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use crate::cpu_features::FeatureCache;
 use crate::silk::define::*;
 use crate::silk::macros::*;
