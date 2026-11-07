@@ -115,6 +115,17 @@ jobs:
           cargo build --release --manifest-path reference/rust/Cargo.toml
           cargo clippy --release --all-targets --manifest-path reference/rust/Cargo.toml -- -D warnings
 
+      # No runner here is 32-bit x86, yet the crate builds for it (Android
+      # x86, for one), and some x86 kernels are compiled for both widths under
+      # `cfg(any(target_arch = "x86", target_arch = "x86_64"))` while others
+      # are x86-64 only. Linting that target is what keeps those `cfg`s and the
+      # dispatch sites agreeing.
+      # Clippy never links, so the target's standard library is all it needs.
+      - name: Clippy for 32-bit x86
+        run: |
+          rustup target add i686-unknown-linux-gnu
+          cargo clippy --release --all-targets --target i686-unknown-linux-gnu -- -D warnings
+
       - name: Documentation
         run: cargo doc --no-deps
         env:
