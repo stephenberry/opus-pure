@@ -1410,6 +1410,15 @@ fn run_prefilter(
         prefilter_period,
         prefilter_gain,
     );
+    // libopus `run_prefilter` (celt_encoder.c) caps the period after the
+    // doubling search: the search can return one sample below `max_period`,
+    // and signalling adds 1, so without the cap `octave = EC_ILOG(pi) - 5`
+    // reaches 6 — outside the 6-symbol alphabet `ec_enc_uint(_, 6)` can code.
+    // The out-of-alphabet encode shifts `val` by a whole window the decoder
+    // never sees, desynchronising every later symbol in the packet.
+    if pitch_index > max_period - 2 {
+        pitch_index = max_period - 2;
+    }
     let mut gain1 = gain1_raw * 0.7;
 
     // Loss-rate ladder (matches celt_encoder.c: halve >2%, halve again >4%,
