@@ -766,9 +766,162 @@ fn reset_state_returns_a_codec_to_its_starting_point() {
 
     let mut dec = OpusDecoder::new(48_000, 2).unwrap();
     dec.gain_q8 = 256;
+    let [celt, ..] = packets_of_every_mode();
+    let mut pcm = vec![0.0f32; 960 * 2];
+    dec.decode(&celt[0], 960, &mut pcm).unwrap();
+    assert_ne!(dec.final_range(), 0);
+    assert_ne!(dec.last_packet_duration(), 0);
     dec.reset_state().unwrap();
     assert_eq!(dec.gain_q8, 256, "the gain is a setting, not coding state");
     assert_eq!(dec.final_range(), 0);
+    assert_eq!(dec.last_packet_duration(), 0);
+}
+
+/// Twelve 20 ms packets of each coding mode: CELT stereo music,
+/// narrowband SILK speech, and the SILK+CELT hybrid.
+fn packets_of_every_mode() -> [Vec<Vec<u8>>; 3] {
+    let run = |rate: i32, channels: usize, bitrate: i32, app: Application, pcm: Vec<f32>| {
+        let mut enc = OpusEncoder::new(rate, channels, app).unwrap();
+        enc.bitrate_bps = bitrate;
+        let mut pkt = vec![0u8; opus_pure::MAX_PACKET_BYTES];
+        let frame = rate as usize / 50;
+        pcm.chunks_exact(frame * channels)
+            .map(|c| {
+                let n = enc.encode(c, frame, &mut pkt).unwrap();
+                pkt[..n].to_vec()
+            })
+            .collect::<Vec<_>>()
+    };
+    let n = 960 * 12;
+    [
+        run(
+            48_000,
+            2,
+            128_000,
+            Application::Audio,
+            interleave(&[music_like(48_000, n), speech_like(48_000, n)]),
+        ),
+        run(
+            16_000,
+            1,
+            12_000,
+            Application::Voip,
+            speech_like(16_000, 320 * 12),
+        ),
+        run(
+            48_000,
+            1,
+            24_000,
+            Application::Audio,
+            speech_like(48_000, n),
+        ),
+    ]
+}
+
+/// A reset decoder decodes exactly as a new one does, whatever it decoded
+/// before, which is what `reset_state` promises now that it resets in place.
+///
+/// Most decoder state is also cleared by a switch between modes, so a reset
+/// that missed some would still pass a test that switched modes straight
+/// after it. Every pairing is tried instead: the used decoder last decoded
+/// each mode, and decodes each mode first after the reset, on the float and the
+/// 16-bit path, with and without a lost packet in front, over a spread of
+/// output rates and channel counts. Some fields are overwritten before anything
+/// reads them after a reset, so no output can see them; the exhaustive
+/// destructure in `reset_state` is what keeps those right.
+#[test]
+fn a_reset_decoder_decodes_like_a_new_one() {
+    let modes = packets_of_every_mode();
+
+    for (rate, channels) in [
+        (48_000, 2),
+        (48_000, 1),
+        (24_000, 2),
+        (16_000, 1),
+        (8_000, 2),
+    ] {
+        let frame_size = rate as usize * 120 / 1000;
+        let mut float = vec![0.0f32; frame_size * channels];
+        let mut s16 = vec![0i16; frame_size * channels];
+
+        // One packet, `None` for a lost one, on the float or the 16-bit path.
+        let play = |dec: &mut OpusDecoder, packets: &[Option<&[u8]>], as_s16: bool| {
+            let mut float = vec![0.0f32; frame_size * channels];
+            let mut s16 = vec![0i16; frame_size * channels];
+            let mut out = Vec::new();
+            for p in packets {
+                let p = p.unwrap_or(&[]);
+                if as_s16 {
+                    let n = dec.decode_s16(p, frame_size, &mut s16).unwrap();
+                    out.extend(s16[..n * channels].iter().map(|&s| s as u32));
+                } else {
+                    let n = dec.decode(p, frame_size, &mut float).unwrap();
+                    out.extend(float[..n * channels].iter().map(|s| s.to_bits()));
+                }
+            }
+            out
+        };
+
+        for first in 0..modes.len() {
+            // The first mode, then the other two, then the first again.
+            let mut after: Vec<Option<&[u8]>> = Vec::new();
+            for m in [first, (first + 1) % 3, (first + 2) % 3, first] {
+                after.extend(modes[m][..3].iter().map(|p| Some(p.as_slice())));
+            }
+            for lead_loss in [false, true] {
+                let after = if lead_loss {
+                    [&[None][..], &after].concat()
+                } else {
+                    after.clone()
+                };
+                for as_s16 in [false, true] {
+                    let want = play(
+                        &mut OpusDecoder::new(rate, channels).unwrap(),
+                        &after,
+                        as_s16,
+                    );
+                    assert!(want.iter().any(|&s| s != 0));
+
+                    for last in 0..modes.len() {
+                        let mut used = OpusDecoder::new(rate, channels).unwrap();
+                        // Every mode, concealment and in-band FEC, then the
+                        // last mode, ending on frames driven so far past full
+                        // scale that the 16-bit path's soft clip is almost
+                        // certainly mid-curve when the reset comes.
+                        for m in [(last + 1) % 3, (last + 2) % 3, last] {
+                            for (i, p) in modes[m][3..9].iter().enumerate() {
+                                match i {
+                                    1 => used.decode(&[], frame_size, &mut float),
+                                    2 => used.decode_fec(p, frame_size, &mut float),
+                                    _ => used.decode(p, frame_size, &mut float),
+                                }
+                                .unwrap();
+                            }
+                        }
+                        used.gain_q8 = 256 * 24;
+                        for p in &modes[last][9..] {
+                            used.decode_s16(p, frame_size, &mut s16).unwrap();
+                        }
+                        used.gain_q8 = 0;
+
+                        used.reset_state().unwrap();
+                        let got = play(&mut used, &after, as_s16);
+                        assert!(
+                            got == want,
+                            "{rate} Hz x{channels}: last decoded mode {last}, then mode {first} \
+                             first{} on the {} path, decoded differently after a reset",
+                            if lead_loss {
+                                " behind a lost packet"
+                            } else {
+                                ""
+                            },
+                            if as_s16 { "16-bit" } else { "float" },
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The decoder can apply the gain RFC 7845 puts in the container header.

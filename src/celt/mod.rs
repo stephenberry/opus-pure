@@ -40,8 +40,9 @@ pub(crate) fn have_avx_fma() -> bool {
     })
 }
 
-/// Companion to [`have_avx_fma`] for kernels declared `avx2,fma`.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+/// Companion to [`have_avx_fma`] for kernels declared `avx2,fma`, all of
+/// which are x86-64 only.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub(crate) fn have_avx2_fma() -> bool {
     static CACHE: FeatureCache = FeatureCache::new();
@@ -214,7 +215,7 @@ fn l1_metric(tmp: &[f32], n: usize, lm: i32, bias: f32) -> f32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 unsafe fn sum_abs_avx(x: &[f32], n: usize) -> f32 {
-    use std::arch::x86_64::*;
+    use crate::x86_intrinsics::*;
 
     // The loads below walk `n` elements; trimming to `n` here is what puts
     // them in bounds.
@@ -757,7 +758,7 @@ unsafe fn comb_filter_const_sse(
     g11: f32,
     g12: f32,
 ) {
-    use std::arch::x86_64::*;
+    use crate::x86_intrinsics::*;
 
     let g10v = _mm_set1_ps(g10);
     let g11v = _mm_set1_ps(g11);
@@ -833,7 +834,7 @@ unsafe fn comb_filter_const_avx(
     g11: f32,
     g12: f32,
 ) {
-    use std::arch::x86_64::*;
+    use crate::x86_intrinsics::*;
 
     let g10v = _mm256_set1_ps(g10);
     let g11v = _mm256_set1_ps(g11);
@@ -946,7 +947,7 @@ unsafe fn comb_filter_const_sse_fma(
     g11: f32,
     g12: f32,
 ) {
-    use std::arch::x86_64::*;
+    use crate::x86_intrinsics::*;
 
     let g10v = _mm_set1_ps(g10);
     let g11v = _mm_set1_ps(g11);
@@ -1317,7 +1318,7 @@ unsafe fn comb_filter_const_avx2(
     g11: f32,
     g12: f32,
 ) -> usize {
-    use std::arch::x86_64::*;
+    use crate::x86_intrinsics::*;
     let vg10 = _mm256_set1_ps(g10);
     let vg11 = _mm256_set1_ps(g11);
     let vg12 = _mm256_set1_ps(g12);
@@ -4454,20 +4455,25 @@ mod tests {
             // entries go through the crate's own predicates instead of
             // repeating their definitions, so this cannot drift away from what
             // the dispatch sites actually test.
-            if std::arch::is_x86_feature_detected!("sse2") {
-                available.push("sse2");
-            }
             if std::arch::is_x86_feature_detected!("avx") {
                 available.push("avx");
             }
             if have_avx_fma() {
                 available.push("avx-fma");
             }
-            if std::arch::is_x86_feature_detected!("avx2") {
-                available.push("avx2");
-            }
-            if have_avx2_fma() {
-                available.push("avx2-fma");
+            // The SSE2 and AVX2 kernels are x86-64 only, so on 32-bit x86
+            // these names would claim kernels that are not compiled in.
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::arch::is_x86_feature_detected!("sse2") {
+                    available.push("sse2");
+                }
+                if std::arch::is_x86_feature_detected!("avx2") {
+                    available.push("avx2");
+                }
+                if have_avx2_fma() {
+                    available.push("avx2-fma");
+                }
             }
         }
 

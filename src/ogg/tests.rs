@@ -229,7 +229,7 @@ fn a_corrupt_page_is_an_error_not_silent_truncation() {
 }
 
 /// The cap on a reassembled packet is what stops a chain of continued pages
-/// from growing `partial` without limit. It sits far above any real packet, so
+/// from growing the reader's packet buffer without limit. It sits far above any real packet, so
 /// exactly the cap still reads back and one byte more is refused.
 #[test]
 fn a_packet_past_the_size_cap_is_refused() {
@@ -386,4 +386,206 @@ fn resyncs_past_leading_garbage() {
     let (_, _, got) = demux(&bytes);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].data, vec![0xfc, 1, 2, 3]);
+}
+
+/// Packets of every framing the reader reassembles: several to a page, one
+/// spanning pages, lengths that are multiples of 255, and a final page flagged
+/// end of stream.
+fn varied_stream() -> Vec<u8> {
+    let head = OpusHead::new(2, 48_000).unwrap();
+    let packets: Vec<(Vec<u8>, u32)> = (0..40)
+        .map(|i| {
+            let len = match i % 5 {
+                0 => 255,
+                1 => 510,
+                2 => 70_000,
+                _ => 40 + i as usize * 3,
+            };
+            (pseudo_packet(i, len), 960)
+        })
+        .collect();
+    mux(head, OpusTags::new(), &packets)
+}
+
+fn all_packets(r: &mut OggOpusReader<std::io::Cursor<&[u8]>>) -> Vec<OggPacket> {
+    let mut out = Vec::new();
+    while let Some(p) = r.read_packet().unwrap() {
+        out.push(p);
+    }
+    out
+}
+
+#[test]
+fn read_packet_into_yields_what_read_packet_does() {
+    let bytes = varied_stream();
+    let want = demux(&bytes).2;
+    assert!(want.last().unwrap().end_of_stream);
+
+    let mut r = OggOpusReader::new(std::io::Cursor::new(&bytes[..])).unwrap();
+    let mut packet = OggPacket::default();
+    let mut got = Vec::new();
+    while r.read_packet_into(&mut packet).unwrap() {
+        got.push(packet.clone());
+    }
+    assert_eq!(got, want);
+
+    // End of stream leaves the caller's packet as the last one read.
+    assert!(!r.read_packet_into(&mut packet).unwrap());
+    assert_eq!(&packet, want.last().unwrap());
+}
+
+/// A rewind from any point, including between two packets of one page and
+/// partway through a packet that spans pages, replays the whole stream.
+#[test]
+fn rewind_replays_the_stream_from_the_first_audio_packet() {
+    let bytes = varied_stream();
+    let want = demux(&bytes).2;
+    for read_first in [0, 1, 2, 3, 7, want.len()] {
+        let mut r = OggOpusReader::new(std::io::Cursor::new(&bytes[..])).unwrap();
+        for _ in 0..read_first {
+            r.read_packet().unwrap().unwrap();
+        }
+        r.rewind().unwrap();
+        assert_eq!(all_packets(&mut r), want, "rewound after {read_first}");
+    }
+}
+
+/// A stream that stops at a page boundary without an end-of-stream page ends
+/// on the source running dry rather than on the flag, and rewinds all the same.
+#[test]
+fn rewind_replays_a_stream_with_no_end_of_stream_page() {
+    let head = OpusHead::new(1, 48_000).unwrap();
+    let packets: Vec<(Vec<u8>, u32)> = (0..60).map(|i| (pseudo_packet(i, 400), 960)).collect();
+    let mut bytes = mux(head, OpusTags::new(), &packets);
+    // Cut the final page, which is the only one flagged end of stream.
+    let last_page = bytes
+        .windows(4)
+        .rposition(|w| w == CAPTURE_PATTERN)
+        .unwrap();
+    assert_ne!(bytes[last_page + 5] & 0x04, 0);
+    bytes.truncate(last_page);
+
+    let mut r = OggOpusReader::new(std::io::Cursor::new(&bytes[..])).unwrap();
+    let want = all_packets(&mut r);
+    assert!(!want.is_empty() && !want.iter().any(|p| p.end_of_stream));
+    r.rewind().unwrap();
+    assert_eq!(all_packets(&mut r), want);
+}
+
+/// The rewind goes back to the audio pages, not to the start of the source:
+/// the header pages are not read again, and a stream that starts partway into
+/// its source rewinds to its own start.
+#[test]
+fn rewind_returns_to_the_first_audio_page_of_a_stream_inside_its_source() {
+    let head = OpusHead::new(1, 48_000).unwrap();
+    let mut tags = OpusTags::new();
+    // Tags large enough to span pages.
+    tags.push("COMMENT", &"x".repeat(200_000)).unwrap();
+    let packets: Vec<(Vec<u8>, u32)> = (0..12).map(|i| (pseudo_packet(i, 300), 960)).collect();
+    // The stream sits after bytes the caller has already read past.
+    let mut bytes = vec![0x5au8; 1000];
+    bytes.extend_from_slice(&mux(head, tags, &packets));
+    let mut source = std::io::Cursor::new(&bytes[..]);
+    source.set_position(1000);
+
+    let mut r = OggOpusReader::new(source).unwrap();
+    let audio_start = r.get_ref().position();
+    let want = all_packets(&mut r);
+    assert_eq!(want.len(), packets.len());
+    r.rewind().unwrap();
+    assert_eq!(r.get_ref().position(), audio_start);
+    assert_eq!(all_packets(&mut r), want);
+}
+
+/// RFC 7845 §3 has the comment header finish its page. A stream whose tags
+/// share a page with audio has no page boundary for a rewind to return to.
+#[test]
+fn a_comment_header_sharing_its_page_with_audio_is_refused() {
+    use super::page::{HeaderType, lacing_values, write_page};
+    let head = OpusHead::new(1, 48_000).unwrap().to_packet();
+    let tags = OpusTags::new().to_packet();
+    let audio = pseudo_packet(1, 100);
+
+    let mut bytes = Vec::new();
+    let head_lacing: Vec<u8> = lacing_values(head.len()).collect();
+    write_page(HeaderType::BOS, 0, 7, 0, &head_lacing, &head, &mut bytes);
+    let lacing: Vec<u8> = lacing_values(tags.len())
+        .chain(lacing_values(audio.len()))
+        .collect();
+    let payload = [&tags[..], &audio[..]].concat();
+    write_page(HeaderType::EOS, 960, 7, 1, &lacing, &payload, &mut bytes);
+
+    let got = OggOpusReader::new(std::io::Cursor::new(&bytes));
+    assert!(
+        matches!(got, Err(Error::InvalidStream(_))),
+        "{:?}",
+        got.map(|_| ())
+    );
+}
+
+/// A stream whose header pages end it has no audio, and a rewind keeps it
+/// ended rather than reading on into whatever follows it in the source.
+#[test]
+fn rewind_keeps_a_stream_that_ends_on_its_headers_ended() {
+    use super::page::{HeaderType, lacing_values, write_page};
+    let head = OpusHead::new(1, 48_000).unwrap().to_packet();
+    let tags = OpusTags::new().to_packet();
+
+    let mut bytes = Vec::new();
+    let lacing: Vec<u8> = lacing_values(head.len()).collect();
+    write_page(HeaderType::BOS, 0, 7, 0, &lacing, &head, &mut bytes);
+    let lacing: Vec<u8> = lacing_values(tags.len()).collect();
+    write_page(HeaderType::EOS, 0, 7, 1, &lacing, &tags, &mut bytes);
+    // A second stream chained after it.
+    bytes.extend_from_slice(&mux(
+        OpusHead::new(2, 48_000).unwrap(),
+        OpusTags::new(),
+        &[(vec![0xfc, 1, 2, 3], 960)],
+    ));
+
+    let mut r = OggOpusReader::new(std::io::Cursor::new(&bytes[..])).unwrap();
+    assert!(r.read_packet().unwrap().is_none());
+    r.rewind().unwrap();
+    assert!(r.read_packet().unwrap().is_none());
+}
+
+/// A source whose seeks can be made to fail.
+struct FlakySeek<'a> {
+    inner: std::io::Cursor<&'a [u8]>,
+    fail: bool,
+}
+
+impl std::io::Read for FlakySeek<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl std::io::Seek for FlakySeek<'_> {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        if self.fail {
+            return Err(std::io::Error::other("seek refused"));
+        }
+        self.inner.seek(to)
+    }
+}
+
+#[test]
+fn a_failed_rewind_leaves_the_reader_where_it_was() {
+    let bytes = varied_stream();
+    let want = demux(&bytes).2;
+    let source = FlakySeek {
+        inner: std::io::Cursor::new(&bytes[..]),
+        fail: true,
+    };
+    let mut r = OggOpusReader::new(source).unwrap();
+    for _ in 0..3 {
+        r.read_packet().unwrap().unwrap();
+    }
+    assert!(matches!(r.rewind(), Err(Error::Io(_))));
+    let mut rest = Vec::new();
+    while let Some(p) = r.read_packet().unwrap() {
+        rest.push(p);
+    }
+    assert_eq!(rest, want[3..]);
 }

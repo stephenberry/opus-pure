@@ -51,13 +51,56 @@ fn encode_size(size: i32, out: &mut Vec<u8>) {
     }
 }
 
-/// Split `data` into its frames. Returns (toc, frame byte-ranges, packet_offset).
+/// Most frames one packet can hold: 120 ms of 2.5 ms frames (RFC 6716 §3.2.5).
+/// `parse_packet` refuses a packet claiming more.
+pub(crate) const MAX_FRAMES: usize = 48;
+
+// `parse_packet` enforces the bound as 5760 samples of frames at least 120
+// samples long (2.5 ms at 48 kHz).
+const _: () = assert!(5760 / 120 == MAX_FRAMES);
+
+/// Up to [`MAX_FRAMES`] values held inline, so parsing a packet on the decode
+/// path allocates nothing.
+#[derive(Clone, Copy)]
+pub(crate) struct FrameList<T: Copy> {
+    items: [T; MAX_FRAMES],
+    len: usize,
+}
+
+impl<T: Copy + Default> FrameList<T> {
+    fn new() -> Self {
+        Self {
+            items: [T::default(); MAX_FRAMES],
+            len: 0,
+        }
+    }
+
+    /// Append `item`. Every caller pushes at most the frame count
+    /// `parse_packet` has already bounded by [`MAX_FRAMES`].
+    fn push(&mut self, item: T) {
+        self.items[self.len] = item;
+        self.len += 1;
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+}
+
+impl<T: Copy> std::ops::Deref for FrameList<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.items[..self.len]
+    }
+}
+
+/// Split `data` into its frames. Returns (toc, frames, packet_offset).
 /// `self_delimited` parses the trailing length prefix used by multistream.
-#[allow(clippy::type_complexity)]
 pub(crate) fn parse_packet(
     data: &[u8],
     self_delimited: bool,
-) -> Result<(u8, Vec<(usize, usize)>, usize)> {
+) -> Result<(u8, FrameList<&[u8]>, usize)> {
     if data.is_empty() {
         return Err(Error::InvalidPacket("invalid packet"));
     }
@@ -67,7 +110,7 @@ pub(crate) fn parse_packet(
     let mut len = data.len() as i32 - 1;
     let mut cbr = false;
     let mut last_size = len;
-    let mut sizes: Vec<i32> = Vec::new();
+    let mut sizes = FrameList::<i32>::new();
 
     let count: usize = match toc & 0x3 {
         0 => 1,
@@ -190,14 +233,14 @@ pub(crate) fn parse_packet(
         sizes.push(last_size);
     }
 
-    // Frame byte-ranges start at `pos`.
-    let mut frames = Vec::with_capacity(count);
+    // Frames start at `pos`.
+    let mut frames = FrameList::new();
     let mut off = pos;
-    for &s in &sizes {
+    for &s in sizes.iter() {
         if off + s as usize > data.len() {
             return Err(Error::InvalidPacket("invalid packet"));
         }
-        frames.push((off, s as usize));
+        frames.push(&data[off..off + s as usize]);
         off += s as usize;
     }
     let packet_offset = off; // for self-delimited multistream advancement
@@ -219,13 +262,7 @@ pub(crate) fn parse_packet(
 pub(crate) fn take_self_delimited_into(data: &[u8], out: &mut Vec<u8>) -> Result<usize> {
     let (toc, frames, consumed) = parse_packet(data, true)?;
     out.clear();
-    emit_packet(
-        toc,
-        frames.iter().map(|&(o, l)| &data[o..o + l]),
-        None,
-        false,
-        out,
-    )?;
+    emit_packet(toc, frames.iter().copied(), None, false, out)?;
     Ok(consumed)
 }
 
@@ -301,11 +338,11 @@ impl Repacketizer {
         if (curr + self.frames.len()) as i32 * self.framesize > 960 {
             return Err(Error::InvalidPacket("packet exceeds 120 ms"));
         }
-        let (_toc, ranges, _off) = parse_packet(data, self_delimited)?;
-        for (o, l) in ranges {
+        let (_toc, frames, _off) = parse_packet(data, self_delimited)?;
+        for &f in frames.iter() {
             let mut frame = self.spare.pop().unwrap_or_default();
             frame.clear();
-            frame.extend_from_slice(&data[o..o + l]);
+            frame.extend_from_slice(f);
             self.frames.push(frame);
         }
         Ok(())
@@ -574,7 +611,7 @@ mod tests {
         let back = unpad_packet(&pkt).unwrap();
         // frame bytes recovered
         let (_t, f, _) = parse_packet(&back, false).unwrap();
-        assert_eq!(&back[f[0].0..f[0].0 + f[0].1], &orig[1..]);
+        assert_eq!(f[0], &orig[1..]);
     }
 
     #[test]
@@ -613,11 +650,8 @@ mod sd_tests {
         let (t, frames, off) = parse_packet(&stream, true).unwrap();
         assert_eq!(t, toc | 0x3);
         assert_eq!(frames.len(), 3);
-        assert_eq!(&stream[frames[0].0..frames[0].0 + frames[0].1], &[1, 1, 1]);
-        assert_eq!(
-            &stream[frames[2].0..frames[2].0 + frames[2].1],
-            &[3, 3, 3, 3]
-        );
+        assert_eq!(frames[0], &[1, 1, 1]);
+        assert_eq!(frames[2], &[3, 3, 3, 3]);
         assert_eq!(off, sd.len()); // packet ends exactly at the SD boundary
     }
 }

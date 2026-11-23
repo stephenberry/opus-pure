@@ -6,7 +6,18 @@ Notable changes to this crate, newest first. Nothing is recorded here from befor
 
 - **Core Audio Format (`.caf`) mux and demux.** Apple's audio frameworks record and play Opus only inside CAF, and little else reads one; `CafOpusReader` and `CafOpusWriter` present the Ogg pair's API over that container, so a recording moves between the two packet for packet, without decoding. The packet table's priming and remainder frames carry across as pre-skip and end-trim, so the gapless recipe works unchanged. Files written here decode through Apple's tools to the sample; a recording from Apple's encoder is in `tests/fixtures/` and read in CI. Mono and stereo.
 - `Error::InvalidStream` now covers both containers, and its message no longer names Ogg.
-- **Decoding and analysis no longer allocate per packet.** The range decoder borrows the packet instead of copying it, tonality analysis keeps its downmix scratch in the encoder state, the multistream decoder rebuilds each stream's packet into one reused buffer, and the Ogg reader reuses its page buffer.
+
+## 0.2.3 — 2026-11-07
+
+- **Builds for 32-bit x86** (`i686-linux-android` and others). The x86 kernels imported `std::arch::x86_64`, which that target lacks.
+
+## 0.2.2 — 2026-09-28
+
+- **Reading and decoding a stream no longer allocate once warm**, including at a loop point. The range decoder borrows the packet instead of copying it, tonality analysis keeps its downmix scratch in the encoder state, the multistream decoder rebuilds each stream's packet into one reused buffer, a packet's frame table is held inline, and the Ogg reader reassembles packets in one reused buffer. `tests/ogg_playback_alloc.rs` holds a looping playback to zero allocations after its first pass.
+- **`OggOpusReader::read_packet_into`** fills an `OggPacket` the caller keeps, where `read_packet` returns a new one. `OggPacket::default()` is the empty one to start from.
+- **`OggOpusReader::rewind`** goes back to the first audio packet of a source that can seek, without reading the header pages again. It replaces rebuilding the reader to loop.
+- **`OpusDecoder::reset_state` resets in place** rather than building a new decoder, so it no longer allocates. It still decodes exactly as a new decoder does.
+- **The Ogg reader refuses a stream whose comment header does not finish its page**, as RFC 7845 §3 requires and libopusfile enforces. That page boundary is where `rewind` returns to.
 - **The Ogg reader caps a reassembled packet at 16 MiB.** A hostile chain of continued pages could previously grow the reader's buffer without limit; it is now refused as an invalid stream.
 - `RangeCoder::shrink` checks its size preconditions in release builds.
 
