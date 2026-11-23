@@ -19,6 +19,10 @@ Both decoders ran at 48 kHz with pre-skip and end-trimming applied identically, 
 
 `opusdec` decoded all of them without complaint.
 
+**Core Audio Format.** The `.caf` side was checked against Apple's Core Audio on macOS 26 (`afconvert`, `afinfo`, `afplay`), which is the same code iOS's `AVAudioRecorder` and `AVAudioPlayer` run. Direction A: files written by `CafOpusWriter` from libopus-encoded packets decode through `afconvert` to WAV of exactly the length `opusdec` produces from the same packets (33.044875 s mono, 122.093563 s stereo), and `afplay` plays them. Direction B: files written by `afconvert -f caff -d opus` — mono, stereo, and a clip that is not a whole number of frames long — read through `CafOpusReader`, remux to Ogg through `OggOpusWriter`, pass `opusinfo`, and decode through `opusdec` to the length of the original WAV. The short one is `tests/fixtures/coreaudio-mono.caf`, and CI decodes it.
+
+What Apple's files turned out to contain, since the format's documentation does not say: the `pakt` table sits ahead of the `data` chunk, where FFmpeg puts it after; the `kuki` chunk is seven big-endian `i32`s of encoder settings — application, sample rate, frame size, bitrate as `OPUS_AUTO`, channels, and two zeros — and not an `OpusHead`; and `priming + valid + remainder` in the table is exactly the packet count times 960. Apple's decoder reads a file with no `kuki`, accepts a table that states a frame count per packet, and rejects a `desc` declaring zero frames per packet when the table does not state them either — which is what FFmpeg writes when it does not know the frame size, and which the reader here accepts by taking each packet's duration from its TOC byte.
+
 ### Codec, direction A
 
 Across a 280-configuration sweep at 20 ms — every sample rate, mono and stereo, every forced bandwidth, both applications, four bitrates, speech and music:

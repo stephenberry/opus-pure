@@ -39,9 +39,10 @@ pub enum Error {
     /// end, or a total duration above the 120 ms an Opus packet may carry.
     InvalidPacket(&'static str),
 
-    /// The Ogg container is malformed: a missing capture pattern, an unsupported
-    /// page version, a CRC mismatch, or an `OpusHead`/`OpusTags` packet that does
-    /// not match RFC 7845.
+    /// The container is malformed. For Ogg: a missing capture pattern, an
+    /// unsupported page version, a CRC mismatch, or an `OpusHead`/`OpusTags`
+    /// packet that does not match RFC 7845. For CAF: a missing or inconsistent
+    /// chunk, or a packet table that does not account for the audio.
     InvalidStream(&'static str),
 
     /// The underlying reader or writer failed.
@@ -66,7 +67,7 @@ impl fmt::Display for Error {
                 write!(f, "buffer too small: need {needed}, got {provided}")
             }
             Error::InvalidPacket(what) => write!(f, "invalid packet: {what}"),
-            Error::InvalidStream(what) => write!(f, "invalid ogg stream: {what}"),
+            Error::InvalidStream(what) => write!(f, "invalid stream: {what}"),
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Internal(what) => write!(f, "internal codec error: {what}"),
         }

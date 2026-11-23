@@ -17,15 +17,16 @@
 
 mod common;
 use common::*;
-use opus_pure::{Application, OggOpusWriter, OpusHead, OpusTags};
+use opus_pure::{Application, CafOpusWriter, OggOpusWriter, OpusHead, OpusTags};
 
 /// One fuzz target's body, as the fuzz crate hands it to libFuzzer.
 type Body = fn(&[u8]);
 
 /// Every target, and the body that runs it.
-const TARGETS: [(&str, Body); 3] = [
+const TARGETS: [(&str, Body); 4] = [
     ("decode_stream", common::fuzz::decode_stream),
     ("ogg_read", common::fuzz::ogg_read),
+    ("caf_read", common::fuzz::caf_read),
     ("packet_shape", common::fuzz::packet_shape),
 ];
 
@@ -148,6 +149,21 @@ fn write_fuzz_seeds() {
             w.write_packet(pkt).unwrap();
         }
         written += write_seed(&root, "ogg_read", &format!("{i}"), &w.finish().unwrap());
+
+        // `caf_read` takes a whole container too. Stated one frame short, so
+        // the seed carries a remainder count as a real recording does.
+        let head = OpusHead::new(channels as u8, rate as u32).unwrap();
+        let mut w = CafOpusWriter::new(std::io::Cursor::new(Vec::new()), head).unwrap();
+        for (j, pkt) in packets.iter().enumerate() {
+            if j + 1 == packets.len() {
+                let short = (960 - 960 / 4) as u32;
+                w.write_packet_with_duration(pkt, short).unwrap();
+            } else {
+                w.write_packet(pkt).unwrap();
+            }
+        }
+        let caf = w.finish().unwrap().into_inner();
+        written += write_seed(&root, "caf_read", &format!("{i}"), &caf);
     }
 
     println!("wrote {written} seeds under {}", root.display());
