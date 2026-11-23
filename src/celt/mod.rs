@@ -1410,6 +1410,10 @@ fn run_prefilter(
         prefilter_period,
         prefilter_gain,
     );
+    // The doubling search can return max_period - 1, one past the largest period
+    // the header can signal: pitch_index + 1 = 1024 needs octave 6, outside
+    // enc_uint(_, 6). libopus caps it here too (run_prefilter, celt_encoder.c).
+    pitch_index = pitch_index.min(max_period - 2);
     let mut gain1 = gain1_raw * 0.7;
 
     // Loss-rate ladder (matches celt_encoder.c: halve >2%, halve again >4%,

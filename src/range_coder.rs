@@ -368,6 +368,12 @@ impl<'a> RangeCoder<'a> {
     #[inline(always)]
     pub fn encode(&mut self, fl: u32, fh: u32, ft: u32) {
         debug_assert!(ft > 0, "encode: ft must be > 0");
+        // A symbol outside the alphabet still encodes, but into a range no
+        // decoder can map back, silently desynchronising the rest of the packet.
+        debug_assert!(
+            fl < fh && fh <= ft,
+            "encode: symbol [{fl}, {fh}) outside alphabet {ft}"
+        );
         let r = Self::celt_udiv(self.rng, ft);
         if fl > 0 {
             self.val = self

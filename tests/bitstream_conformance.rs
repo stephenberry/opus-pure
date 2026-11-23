@@ -181,6 +181,31 @@ fn range_coder_state_agrees_on_every_packet() {
     );
 }
 
+/// A pitch at the top of the comb filter's range (period ~1024 samples at
+/// 48 kHz) must still be signalled in range. The doubling search could return
+/// 1023, one past the largest codable period, and the out-of-alphabet octave it
+/// produced desynchronised the rest of the packet (issue #9).
+#[test]
+fn a_pitch_at_the_top_of_the_comb_filter_range_stays_codable() {
+    const FRAME: usize = 960;
+    for period in [1023.0f32, 1023.5, 1024.0, 1024.5, 1025.0] {
+        for channels in [1, 2] {
+            let what = format!("period {period}/{channels}ch");
+            let mut s = InStep::new(48_000, channels, Application::Audio);
+            for f in 0..20 {
+                // A decaying 10-cycle burst at the start of every period.
+                let pcm: Vec<f32> = (0..FRAME * channels)
+                    .map(|j| {
+                        let phase = ((f * FRAME + j / channels) as f32 / period).fract();
+                        0.2 * (-phase * 40.0).exp() * (std::f32::consts::TAU * phase * 10.0).sin()
+                    })
+                    .collect();
+                s.step(&pcm, FRAME, &what);
+            }
+        }
+    }
+}
+
 /// The coverage the official vectors have that a fixed-configuration sweep does
 /// not: transitions. Bandwidth, bitrate and signal type change every few frames
 /// in one continuous stream, so the encoder crosses SILK/hybrid/CELT boundaries

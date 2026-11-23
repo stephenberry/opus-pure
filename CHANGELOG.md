@@ -7,6 +7,10 @@ Notable changes to this crate, newest first. Nothing is recorded here from befor
 - **Core Audio Format (`.caf`) mux and demux.** Apple's audio frameworks record and play Opus only inside CAF, and little else reads one; `CafOpusReader` and `CafOpusWriter` present the Ogg pair's API over that container, so a recording moves between the two packet for packet, without decoding. The packet table's priming and remainder frames carry across as pre-skip and end-trim, so the gapless recipe works unchanged. Files written here decode through Apple's tools to the sample; a recording from Apple's encoder is in `tests/fixtures/` and read in CI. Mono and stereo.
 - `Error::InvalidStream` now covers both containers, and its message no longer names Ogg.
 
+## 0.2.4 — 2026-11-23
+
+- **Fixed corrupt CELT packets on low-pitched audio.** A pitch period near 1024 samples (about 47 Hz at 48 kHz) was signalled out of range, and every decoder, libopus included, decoded the rest of that packet as garbage, often as loud bursts. Thanks to @lunateque (#8) and @Sugo-Labs (#9).
+
 ## 0.2.3 — 2026-11-07
 
 - **Builds for 32-bit x86** (`i686-linux-android` and others). The x86 kernels imported `std::arch::x86_64`, which that target lacks.
