@@ -480,10 +480,12 @@ fn a_table_that_disagrees_with_the_data_is_rejected() {
     assert!(is_invalid_stream(open(&c)));
 }
 
-/// A file cut short is an error where it is cut: in the headers it cannot be
-/// opened, and in the audio the packet that runs off the end is reported.
+/// A file cut short cannot be opened, wherever the cut falls: a chunk that
+/// claims bytes the file does not hold is refused before anything is read
+/// from it, and a claim is never an allocation. Both layouts, and both the
+/// audio and the headers.
 #[test]
-fn a_truncated_file_is_reported_where_it_ends() {
+fn a_truncated_file_is_rejected_at_open() {
     let file = write(
         head(312, 1),
         &[packet(TOC_20MS, 10, 1), packet(TOC_20MS, 20, 2)],
@@ -499,9 +501,17 @@ fn a_truncated_file_is_reported_where_it_ends() {
         c
     };
     let whole = assemble(&apple);
-    let mut r = CafOpusReader::new(Cursor::new(whole[..whole.len() - 5].to_vec())).unwrap();
-    assert!(r.read_packet().unwrap().is_some());
-    assert!(r.read_packet().is_err());
+    assert!(is_invalid_stream(CafOpusReader::new(Cursor::new(
+        whole[..whole.len() - 5].to_vec()
+    ))));
+    // The same with the data chunk open-ended, as Apple writes it.
+    let mut open_ended = apple.clone();
+    let data = find(&open_ended, chunk_type::DATA);
+    open_ended[data].1 = -1;
+    let whole = assemble(&open_ended);
+    assert!(is_invalid_stream(CafOpusReader::new(Cursor::new(
+        whole[..whole.len() - 5].to_vec()
+    ))));
 
     // Cut inside the desc chunk.
     assert!(is_invalid_stream(CafOpusReader::new(Cursor::new(
@@ -511,17 +521,87 @@ fn a_truncated_file_is_reported_where_it_ends() {
     assert!(is_invalid_stream(CafOpusReader::new(Cursor::new(
         file[..14].to_vec()
     ))));
+    // Cut inside a chunk the reader would otherwise skip.
+    let mut c = c.clone();
+    c.insert(1, (*b"free", 64, vec![0; 8]));
+    assert!(is_invalid_stream(CafOpusReader::new(Cursor::new(
+        assemble(&c)
+    ))));
 }
 
+/// A header's sizes are claims, and a small file can make large ones. None
+/// may turn into an allocation before it has been checked against the file.
+#[test]
+fn oversized_claims_are_refused_without_being_allocated() {
+    let file = write(head(312, 1), &[packet(TOC_20MS, 10, 1)], None);
+    let open = |c: &[([u8; 4], i64, Vec<u8>)]| CafOpusReader::new(Cursor::new(assemble(c)));
+    let base = chunks(&file);
+    let data = find(&base, chunk_type::DATA);
+    let pakt = find(&base, chunk_type::PAKT);
+    let desc = find(&base, chunk_type::DESC);
+
+    // One packet the table says is a terabyte, in a data chunk that claims
+    // to hold it.
+    let mut c = base.clone();
+    c[data].1 = (1 << 40) + 4;
+    c[pakt].2.truncate(24);
+    for b in [0x80 | 0x40, 0x80, 0x80, 0x80, 0x80, 0x00] {
+        c[pakt].2.push(b);
+    }
+    assert!(is_invalid_stream(open(&c)));
+
+    // A constant packet size, so there is no table to bound the count, and a
+    // data chunk claiming a terabyte of them.
+    let mut c = base.clone();
+    c[data].1 = (1 << 40) + 4;
+    c[desc].2[16..20].copy_from_slice(&1u32.to_be_bytes());
+    c[pakt].2.truncate(24);
+    c[pakt].2[0..8].copy_from_slice(&(1i64 << 40).to_be_bytes());
+    assert!(is_invalid_stream(open(&c)));
+
+    // A packet table far longer than the file.
+    let mut c = base.clone();
+    c[pakt].1 = 1 << 27;
+    assert!(is_invalid_stream(open(&c)));
+}
+
+/// A source that fails partway through the audio is reported once, and the
+/// iterator then ends rather than repeating the error.
 #[test]
 fn the_iterator_stops_after_an_error() {
+    /// A cursor that refuses to read past `limit` bytes.
+    struct Failing {
+        inner: Cursor<Vec<u8>>,
+        limit: u64,
+    }
+    impl std::io::Read for Failing {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let at = self.inner.position();
+            if at < self.limit && at + buf.len() as u64 > self.limit {
+                return Err(std::io::Error::other("source failed"));
+            }
+            self.inner.read(buf)
+        }
+    }
+    impl std::io::Seek for Failing {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
     let file = write(head(312, 1), &vec![packet(TOC_20MS, 10, 1); 3], None);
+    // Table first, so the failure lands in the audio.
     let mut c = chunks(&file);
     let pakt = c.remove(find(&c, chunk_type::PAKT));
     let data = find(&c, chunk_type::DATA);
     c.insert(data, pakt);
-    let whole = assemble(&c);
-    let mut r = CafOpusReader::new(Cursor::new(whole[..whole.len() - 3].to_vec())).unwrap();
+    let file = assemble(&c);
+    let limit = file.len() as u64 - 3;
+    let mut r = CafOpusReader::new(Failing {
+        inner: Cursor::new(file),
+        limit,
+    })
+    .unwrap();
     let results: Vec<_> = r.packets().collect();
     assert_eq!(results.len(), 3);
     assert!(results[0].is_ok() && results[1].is_ok() && results[2].is_err());

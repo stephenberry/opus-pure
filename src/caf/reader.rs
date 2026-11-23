@@ -274,6 +274,12 @@ fn walk_chunks<R: Read + Seek>(source: &mut R) -> Result<Chunks> {
         return Err(Error::InvalidStream("unsupported caf file version"));
     }
 
+    // Every chunk size is checked against where the file actually ends before
+    // it is believed: sizes drive allocations and seeks, and a header is a
+    // claim, not a measurement.
+    let file_len = source.seek(SeekFrom::End(0))?;
+    source.seek(SeekFrom::Start(FILE_HEADER_LEN as u64))?;
+
     let mut chunks = Chunks::default();
     let mut raw = [0u8; CHUNK_HEADER_LEN];
     loop {
@@ -288,6 +294,14 @@ fn walk_chunks<R: Read + Seek>(source: &mut R) -> Result<Chunks> {
         let size = be_i64(&raw[4..]);
         if size < SIZE_TO_END {
             return Err(Error::InvalidStream("caf chunk has a negative size"));
+        }
+        if size != SIZE_TO_END {
+            let body_start = source.stream_position()?;
+            if (size as u64) > file_len.saturating_sub(body_start) {
+                return Err(Error::InvalidStream(
+                    "caf chunk runs past the end of the file",
+                ));
+            }
         }
 
         match &kind {
@@ -313,8 +327,7 @@ fn walk_chunks<R: Read + Seek>(source: &mut R) -> Result<Chunks> {
                 let start = source.stream_position()?;
                 let len = if size == SIZE_TO_END {
                     // Runs to the end of the file, so nothing can follow it.
-                    let end = source.seek(SeekFrom::End(0))?;
-                    end.saturating_sub(start)
+                    file_len.saturating_sub(start)
                 } else {
                     size as u64
                 };
