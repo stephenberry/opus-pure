@@ -1,4 +1,5 @@
-//! A playback loop over an `.opus` file touches the heap only while warming up.
+//! A playback loop over an `.opus` or `.caf` file touches the heap only while
+//! warming up.
 //!
 //! The loop is the one a game's music player runs: read a packet into a kept
 //! `OggPacket`, decode it into a kept block, trim it, and at the end of the
@@ -13,11 +14,12 @@
 mod common;
 use common::*;
 use opus_pure::{
-    Application, MAX_PACKET_BYTES, MAX_PACKET_SAMPLES, OggOpusReader, OggOpusWriter, OggPacket,
-    OpusEncoder, OpusHead, Trim,
+    Application, CafOpusReader, CafOpusWriter, MAX_PACKET_BYTES, MAX_PACKET_SAMPLES, OggOpusReader,
+    OggOpusWriter, OggPacket, OpusEncoder, OpusHead, Trim,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Counting;
@@ -84,9 +86,59 @@ fn encode(rate: i32, channels: usize, bitrate: i32, pcm: &[f32]) -> Vec<u8> {
     w.finish().unwrap()
 }
 
+/// An Ogg Opus stream's packets moved into a CAF file, unchanged.
+fn to_caf(ogg: &[u8]) -> Vec<u8> {
+    let mut reader = OggOpusReader::new(Cursor::new(ogg)).unwrap();
+    let mut writer = CafOpusWriter::new(Cursor::new(Vec::new()), reader.head().clone()).unwrap();
+    let mut packets = reader.packets().peekable();
+    while let Some(packet) = packets.next() {
+        let packet = packet.unwrap();
+        if packets.peek().is_none() {
+            let duration = packet.page_granule - writer.granule();
+            writer
+                .write_packet_with_duration(&packet.data, duration as u32)
+                .unwrap();
+        } else {
+            writer.write_packet(&packet.data).unwrap();
+        }
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+/// What the player needs of a reader, so one loop covers both containers.
+trait Looping {
+    fn head(&self) -> &OpusHead;
+    fn read_packet_into(&mut self, packet: &mut OggPacket) -> bool;
+    fn rewind(&mut self);
+}
+
+impl Looping for OggOpusReader<Cursor<&[u8]>> {
+    fn head(&self) -> &OpusHead {
+        OggOpusReader::head(self)
+    }
+    fn read_packet_into(&mut self, packet: &mut OggPacket) -> bool {
+        OggOpusReader::read_packet_into(self, packet).unwrap()
+    }
+    fn rewind(&mut self) {
+        OggOpusReader::rewind(self).unwrap()
+    }
+}
+
+impl Looping for CafOpusReader<Cursor<&[u8]>> {
+    fn head(&self) -> &OpusHead {
+        CafOpusReader::head(self)
+    }
+    fn read_packet_into(&mut self, packet: &mut OggPacket) -> bool {
+        CafOpusReader::read_packet_into(self, packet).unwrap()
+    }
+    fn rewind(&mut self) {
+        CafOpusReader::rewind(self).unwrap()
+    }
+}
+
 /// A looping music player's state, kept across passes.
-struct Player<'a> {
-    reader: OggOpusReader<std::io::Cursor<&'a [u8]>>,
+struct Player<S> {
+    reader: S,
     decoder: opus_pure::OpusDecoder,
     trim: Trim,
     packet: OggPacket,
@@ -94,11 +146,10 @@ struct Player<'a> {
     channels: usize,
 }
 
-impl<'a> Player<'a> {
+impl<S: Looping> Player<S> {
     const RATE: i32 = 48_000;
 
-    fn new(bytes: &'a [u8]) -> Self {
-        let reader = OggOpusReader::new(std::io::Cursor::new(bytes)).unwrap();
+    fn new(reader: S) -> Self {
         let channels = reader.head().channel_count as usize;
         Player {
             decoder: reader.head().decoder(Self::RATE).unwrap(),
@@ -114,14 +165,14 @@ impl<'a> Player<'a> {
     /// many samples the pass kept.
     fn pass(&mut self) -> usize {
         let mut kept = 0;
-        while self.reader.read_packet_into(&mut self.packet).unwrap() {
+        while self.reader.read_packet_into(&mut self.packet) {
             let n = self
                 .decoder
                 .decode(&self.packet.data, MAX_PACKET_SAMPLES, &mut self.block)
                 .unwrap();
             kept += self.trim.keep_range(&self.packet, n * self.channels).len();
         }
-        self.reader.rewind().unwrap();
+        self.reader.rewind();
         self.decoder.reset_state().unwrap();
         self.trim = Trim::new(self.reader.head(), Self::RATE, self.channels).unwrap();
         kept
@@ -155,14 +206,25 @@ fn a_looping_playback_allocates_nothing_after_its_first_pass() {
             encode(48_000, 1, 24_000, &speech_like(48_000, second(48_000))),
         ),
     ];
-    for (what, bytes) in &streams {
-        let mut player = Player::new(bytes);
-        let first = player.pass();
-        assert!(first > 0);
-
-        let mut later = [0; 2];
-        let allocations = allocations_in(|| later = [player.pass(), player.pass()]);
-        assert_eq!(later, [first, first], "{what}");
-        assert_eq!(allocations, 0, "{what} allocated on a warm pass");
+    for (what, ogg_bytes) in &streams {
+        let caf_bytes = to_caf(ogg_bytes);
+        let ogg = Player::new(OggOpusReader::new(Cursor::new(&ogg_bytes[..])).unwrap());
+        let caf = Player::new(CafOpusReader::new(Cursor::new(&caf_bytes[..])).unwrap());
+        let first = assert_warm_passes_allocate_nothing(ogg, &format!("{what} ogg"));
+        let first_caf = assert_warm_passes_allocate_nothing(caf, &format!("{what} caf"));
+        assert_eq!(first_caf, first, "{what}: the containers disagree");
     }
+}
+
+/// Play `player` through three times, checking the last two allocate nothing
+/// and keep what the first did, and return how many samples a pass keeps.
+fn assert_warm_passes_allocate_nothing(mut player: Player<impl Looping>, what: &str) -> usize {
+    let first = player.pass();
+    assert!(first > 0);
+
+    let mut later = [0; 2];
+    let allocations = allocations_in(|| later = [player.pass(), player.pass()]);
+    assert_eq!(later, [first, first], "{what}");
+    assert_eq!(allocations, 0, "{what} allocated on a warm pass");
+    first
 }

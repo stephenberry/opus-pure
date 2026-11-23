@@ -74,16 +74,41 @@ enum Duration {
 /// find it would have to hold the whole file in memory instead. Files seek,
 /// and so does [`Cursor`](std::io::Cursor) over a buffer.
 ///
+/// # Reading without allocating
+///
+/// [`read_packet`](Self::read_packet) hands out a new `Vec` per packet.
+/// [`read_packet_into`](Self::read_packet_into) fills one the caller keeps
+/// instead, and the reader reuses its own buffer, so once the largest packet
+/// has been seen a playback loop reads without touching the heap.
+///
 /// # Reading forward
 ///
-/// Packets are read in order from the first. Playing a file again means
-/// starting over: take the source back with [`into_inner`](Self::into_inner)
-/// and construct a new reader. A decoder carried across that boundary needs
+/// Packets are read in order from the first. Playing a file again means going
+/// back to the start, which [`rewind`](Self::rewind) does without reading the
+/// chunk headers again.
+///
+/// ```no_run
+/// use opus_pure::{CafOpusReader, OggPacket};
+///
+/// let mut reader = CafOpusReader::new(std::fs::File::open("in.caf")?)?;
+/// let mut packet = OggPacket::default();
+/// while reader.read_packet_into(&mut packet)? {
+///     // decoder.decode(&packet.data, ...)
+/// }
+/// reader.rewind()?;   // back at the first packet
+/// # Ok::<(), opus_pure::Error>(())
+/// ```
+///
+/// A decoder carried across that boundary needs
 /// [`reset_state`](crate::OpusDecoder::reset_state), and the `Trim` needs
-/// replacing.
+/// replacing, or the second pass begins with the first one's state and counts.
 pub struct CafOpusReader<R: Read + Seek> {
     source: R,
     head: OpusHead,
+    /// Offset of the first packet in the source, where a rewind seeks to.
+    first_packet: u64,
+    /// The packet being read, reused from one to the next.
+    buf: Vec<u8>,
     /// Every packet's size in bytes, in file order.
     sizes: Vec<u64>,
     duration: Duration,
@@ -167,6 +192,8 @@ impl<R: Read + Seek> CafOpusReader<R> {
         Ok(CafOpusReader {
             source,
             head,
+            first_packet,
+            buf: Vec::new(),
             sizes,
             duration,
             next: 0,
@@ -203,38 +230,50 @@ impl<R: Read + Seek> CafOpusReader<R> {
     }
 
     /// The next packet, or `None` after the last.
+    ///
+    /// Each packet is a new `Vec`; [`read_packet_into`](Self::read_packet_into)
+    /// reuses one instead.
     pub fn read_packet(&mut self) -> Result<Option<OggPacket>> {
-        let Some(&size) = self.sizes.get(self.next) else {
+        let Some(last) = self.next_packet()? else {
             return Ok(None);
         };
-        let mut data = vec![0u8; size as usize];
-        if let Err(e) = self.source.read_exact(&mut data) {
-            // The source's position is no longer known, so there is no
-            // reading on from here: the error is reported once and the
-            // stream is over, as an Ogg stream cut mid-packet is.
-            self.next = self.sizes.len();
-            return Err(Error::Io(e));
-        }
+        Ok(Some(OggPacket::new(self.buf.clone(), self.granule, last)))
+    }
 
-        let samples_48k = match &self.duration {
-            Duration::Constant(frames) => frames * self.ticks,
-            Duration::PerPacket(frames) => frames[self.next] * self.ticks,
-            // A packet the TOC cannot describe will not decode either; it
-            // advances nothing and the decoder reports it.
-            Duration::FromPacket => crate::packet::samples_48k(&data).unwrap_or(0) as u64,
+    /// Read the next packet into `packet`, reusing its `data` buffer.
+    ///
+    /// Returns `false` after the last packet. `packet` is overwritten only when
+    /// this returns `true`, and its `data` grows only when a packet is longer
+    /// than any it has held, so a caller keeping one `OggPacket` for a whole
+    /// file reads it without allocating once the longest packet has passed.
+    pub fn read_packet_into(&mut self, packet: &mut OggPacket) -> Result<bool> {
+        let Some(last) = self.next_packet()? else {
+            return Ok(false);
         };
-        self.next += 1;
-        let last = self.next == self.sizes.len();
+        packet.data.clear();
+        packet.data.extend_from_slice(&self.buf);
+        packet.page_granule = self.granule;
+        packet.end_of_stream = last;
+        Ok(true)
+    }
 
-        // The last packet reports the file's own count of where the audio
-        // ends rather than the running total, which is how the end padding is
-        // stated: exactly as an Ogg file's final page under-claims.
-        self.granule = if last {
-            self.final_granule
-        } else {
-            self.granule.saturating_add(samples_48k as i64)
-        };
-        Ok(Some(OggPacket::new(data, self.granule, last)))
+    /// Go back to the first packet, as if the reader had just been
+    /// constructed.
+    ///
+    /// This is how a file loops: it seeks the source back to the start of the
+    /// audio, so the chunk headers are neither read nor parsed again and
+    /// nothing is allocated. It also recovers a reader that stopped at a read
+    /// error, since the seek puts the source back at a known position.
+    ///
+    /// A decoder carried across the rewind needs
+    /// [`reset_state`](crate::OpusDecoder::reset_state), and the
+    /// [`Trim`](crate::Trim) needs replacing, as the type-level docs describe.
+    /// If the seek fails the reader is left where it was.
+    pub fn rewind(&mut self) -> Result<()> {
+        self.source.seek(SeekFrom::Start(self.first_packet))?;
+        self.next = 0;
+        self.granule = 0;
+        Ok(())
     }
 
     /// The remaining packets, as an iterator.
@@ -257,6 +296,43 @@ impl<R: Read + Seek> CafOpusReader<R> {
     /// The underlying source.
     pub fn get_ref(&self) -> &R {
         &self.source
+    }
+
+    /// Read the next packet into `buf` and advance `granule` past it,
+    /// returning whether it is the last, or `None` after the last.
+    fn next_packet(&mut self) -> Result<Option<bool>> {
+        let Some(&size) = self.sizes.get(self.next) else {
+            return Ok(None);
+        };
+        // Bounded by the data chunk, which the table was checked against.
+        self.buf.resize(size as usize, 0);
+        if let Err(e) = self.source.read_exact(&mut self.buf) {
+            // The source's position is no longer known, so there is no
+            // reading on from here until a rewind: the error is reported once
+            // and the stream is over, as an Ogg stream cut mid-packet is.
+            self.next = self.sizes.len();
+            return Err(Error::Io(e));
+        }
+
+        let samples_48k = match &self.duration {
+            Duration::Constant(frames) => frames * self.ticks,
+            Duration::PerPacket(frames) => frames[self.next] * self.ticks,
+            // A packet the TOC cannot describe will not decode either; it
+            // advances nothing and the decoder reports it.
+            Duration::FromPacket => crate::packet::samples_48k(&self.buf).unwrap_or(0) as u64,
+        };
+        self.next += 1;
+        let last = self.next == self.sizes.len();
+
+        // The last packet reports the file's own count of where the audio
+        // ends rather than the running total, which is how the end padding is
+        // stated: exactly as an Ogg file's final page under-claims.
+        self.granule = if last {
+            self.final_granule
+        } else {
+            self.granule.saturating_add(samples_48k as i64)
+        };
+        Ok(Some(last))
     }
 }
 

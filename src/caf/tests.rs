@@ -566,7 +566,7 @@ fn oversized_claims_are_refused_without_being_allocated() {
 }
 
 /// A source that fails partway through the audio is reported once, and the
-/// iterator then ends rather than repeating the error.
+/// iterator then ends rather than repeating the error until a rewind.
 #[test]
 fn the_iterator_stops_after_an_error() {
     /// A cursor that refuses to read past `limit` bytes.
@@ -606,4 +606,57 @@ fn the_iterator_stops_after_an_error() {
     assert_eq!(results.len(), 3);
     assert!(results[0].is_ok() && results[1].is_ok() && results[2].is_err());
     assert!(r.packets().next().is_none());
+
+    // A rewind puts the source back at a known position, so the reader reads
+    // again from the start.
+    r.rewind().unwrap();
+    let again: Vec<_> = r.packets().collect();
+    assert_eq!(again.len(), 3);
+    assert_eq!(again[0].as_ref().unwrap(), results[0].as_ref().unwrap());
+    assert!(again[2].is_err());
+}
+
+/// `read_packet_into` yields what `read_packet` does, and leaves the packet
+/// alone once there are none left.
+#[test]
+fn reading_into_a_kept_packet_matches_reading_new_ones() {
+    let packets = vec![
+        packet(TOC_20MS, 40, 1),
+        packet(TOC_10MS, 7, 2),
+        packet(TOC_20MS, 25, 3),
+    ];
+    let file = write(head(312, 2), &packets, Some(100));
+    let (_, expected) = read_all(&file);
+
+    let mut r = CafOpusReader::new(Cursor::new(&file)).unwrap();
+    let mut kept = OggPacket::default();
+    let mut got = Vec::new();
+    while r.read_packet_into(&mut kept).unwrap() {
+        got.push(kept.clone());
+    }
+    assert_eq!(got, expected);
+    assert_eq!(kept, expected[2], "the end left the last packet in place");
+}
+
+/// A rewind from the end, from partway through, or before reading anything
+/// replays the file from its first packet with the same granules.
+#[test]
+fn a_rewind_replays_the_file_from_the_start() {
+    let packets: Vec<_> = (0..5).map(|i| packet(TOC_20MS, 10 + i, i as u8)).collect();
+    let file = write(head(312, 1), &packets, Some(500));
+    let (_, expected) = read_all(&file);
+
+    let mut r = CafOpusReader::new(Cursor::new(&file)).unwrap();
+    r.rewind().unwrap();
+    let first: Vec<_> = r.packets().collect::<crate::Result<_>>().unwrap();
+    assert_eq!(first, expected);
+
+    r.rewind().unwrap();
+    let mut kept = OggPacket::default();
+    for _ in 0..2 {
+        assert!(r.read_packet_into(&mut kept).unwrap());
+    }
+    r.rewind().unwrap();
+    let again: Vec<_> = r.packets().collect::<crate::Result<_>>().unwrap();
+    assert_eq!(again, expected);
 }

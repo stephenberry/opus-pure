@@ -4,7 +4,7 @@ Notable changes to this crate, newest first. Nothing is recorded here from befor
 
 ## Unreleased
 
-- **Core Audio Format (`.caf`) mux and demux.** Apple's audio frameworks record and play Opus only inside CAF, and little else reads one; `CafOpusReader` and `CafOpusWriter` present the Ogg pair's API over that container, so a recording moves between the two packet for packet, without decoding. The packet table's priming and remainder frames carry across as pre-skip and end-trim, so the gapless recipe works unchanged. Files written here decode through Apple's tools to the sample; a recording from Apple's encoder is in `tests/fixtures/` and read in CI. Mono and stereo.
+- **Core Audio Format (`.caf`) mux and demux.** Apple's audio frameworks record and play Opus only inside CAF, and little else reads one; `CafOpusReader` and `CafOpusWriter` present the Ogg pair's API over that container, so a recording moves between the two packet for packet, without decoding. The packet table's priming and remainder frames carry across as pre-skip and end-trim, so the gapless recipe works unchanged. Files written here decode through Apple's tools to the sample; a recording from Apple's encoder is in `tests/fixtures/` and read in CI. Mono and stereo. `CafOpusReader::read_packet_into` and `rewind` loop a file without allocating, as the Ogg reader's do.
 - `Error::InvalidStream` now covers both containers, and its message no longer names Ogg.
 
 ## 0.2.4 — 2026-11-23
