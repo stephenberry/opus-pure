@@ -1,6 +1,6 @@
 [package]
 name = "opus-pure"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 rust-version = "1.88.0"
 description = "Pure-Rust Opus audio codec (RFC 6716) with Ogg (RFC 7845) and Core Audio Format encapsulation"
