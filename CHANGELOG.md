@@ -2,6 +2,10 @@
 
 Notable changes to this crate, newest first. Nothing is recorded here from before the first public release; what this crate changed relative to the fork it came from is described in [ATTRIBUTION.md](ATTRIBUTION.md).
 
+## Unreleased
+
+- **Fixed corrupt CELT packets on low-pitched audio.** A pitch period near 1024 samples (about 47 Hz at 48 kHz) was signalled out of range, and every decoder, libopus included, decoded the rest of that packet as garbage, often as loud bursts. Thanks to @lunateque (#8) and @Sugo-Labs (#9).
+
 ## 0.2.3 — 2026-11-07
 
 - **Builds for 32-bit x86** (`i686-linux-android` and others). The x86 kernels imported `std::arch::x86_64`, which that target lacks.
