@@ -461,7 +461,9 @@ pub fn silk_burg_modified_fix(
 }
 
 const QA_INV: i32 = 24;
-const A_LIMIT: i32 = 16773043;
+/// `SILK_FIX_CONST(0.99975, QA)` in libopus's `LPC_inv_pred_gain.c`:
+/// 0.99975 * 2^24 + 0.5, truncated.
+const A_LIMIT: i32 = 16_773_022;
 
 fn lpc_inverse_pred_gain_qa(a_qa_in: &mut [i32], order: usize) -> i32 {
     let mut inv_gain_q30 = 1 << 30;
@@ -490,7 +492,7 @@ fn lpc_inverse_pred_gain_qa(a_qa_in: &mut [i32], order: usize) -> i32 {
             };
 
             let tmp64_1 = silk_rshift_round64(
-                silk_smull(tmp1.wrapping_sub(mul_q(tmp2, rc_q31, 31)), rc_mult2),
+                silk_smull(tmp1.saturating_sub(mul_q(tmp2, rc_q31, 31)), rc_mult2),
                 mult2q,
             );
             if tmp64_1 > i32::MAX as i64 || tmp64_1 < i32::MIN as i64 {
@@ -499,7 +501,7 @@ fn lpc_inverse_pred_gain_qa(a_qa_in: &mut [i32], order: usize) -> i32 {
             a_qa_in[n] = tmp64_1 as i32;
 
             let tmp64_2 = silk_rshift_round64(
-                silk_smull(tmp2.wrapping_sub(mul_q(tmp1, rc_q31, 31)), rc_mult2),
+                silk_smull(tmp2.saturating_sub(mul_q(tmp1, rc_q31, 31)), rc_mult2),
                 mult2q,
             );
             if tmp64_2 > i32::MAX as i64 || tmp64_2 < i32::MIN as i64 {
@@ -535,4 +537,29 @@ pub fn silk_lpc_inverse_pred_gain(a_q12: &[i16], order: usize) -> i32 {
         return 0;
     }
     lpc_inverse_pred_gain_qa(&mut atmp_qa, order)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_limit_is_libopus_constant() {
+        // `SILK_FIX_CONST(C, Q)` is `(opus_int32)(C * (1 << Q) + 0.5)`.
+        assert_eq!(A_LIMIT, (0.99975f64 * (1i64 << QA_INV) as f64 + 0.5) as i32);
+    }
+
+    /// Interpolated LPC coefficients of a 16 kHz SILK frame (a libopus-encoded
+    /// chirp, packets 33 then 34). During the recursion a coefficient lands
+    /// between 0.99975 and the old limit in Q24, so libopus calls the filter
+    /// unstable and `silk_NLSF2A` applies bandwidth expansion. With the old
+    /// limit this returned a nonzero gain and the decode drifted from libopus
+    /// from that frame on.
+    #[test]
+    fn coefficients_past_the_limit_are_unstable() {
+        let a_q12: [i16; 16] = [
+            -710, -3865, 460, -79, 305, -396, 258, -377, -67, -575, -485, -397, -51, -57, 254, -20,
+        ];
+        assert_eq!(silk_lpc_inverse_pred_gain(&a_q12, 16), 0);
+    }
 }
